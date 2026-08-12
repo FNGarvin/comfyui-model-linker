@@ -32,13 +32,11 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 
 ## HuggingFace authentication
 
-Downloads from HuggingFace are **anonymous by default** — a token is only ever sent if a model turns out to be gated (license click-through required) and one is available, or if you explicitly opt in. Model Linker never reads your `hf auth login` session (the cached token file the HuggingFace CLI stores in your home folder); a long-running shell login shouldn't silently leak into a download you didn't expect it to touch.
+Downloads from HuggingFace are **anonymous by default** — a token is only ever sent if a model turns out to be gated (license click-through required) and one is available, or if you explicitly opt in. 
 
-**If a download fails with "this model is gated"**, set a token in the environment ComfyUI itself runs in (not just your shell — see below), then retry. If nothing's configured there, that's the only case a gated download can't complete on its own.
+**"Always send HF token" checkbox**: off by default. Turning it on sends your token on every HuggingFace download from the start instead of only when a model is actually gated. Not required for correctness — anonymous downloads work fine for public models — but authenticated requests can be more resilient to throttling under load, so it's potentially worth enabling if you're pulling a lot of models on a fast connection and want to avoid anonymous rate limits. The checkbox shows **(detected)** in green or **(not detected)** in red next to it, so you can tell at a glance whether a token is actually available to send before you bother checking it.
 
-**"Always send HF token" checkbox** (in the Missing Models dialog's footer): off by default. Turning it on sends your token on every HuggingFace download from the start instead of only when a model is actually gated. Not required for correctness — anonymous downloads work fine for public models — but authenticated requests can get better treatment from HuggingFace's CDN under load, so it's worth enabling if you're pulling a lot of models on a fast connection and want to avoid anonymous rate limits. The checkbox shows **(detected)** in green or **(not detected)** in red next to it, so you can tell at a glance whether a token is actually available to send before you bother checking it.
-
-### Providing a token
+### Providing a HF_TOKEN
 
 Set either of these in the environment ComfyUI's process runs in (an env var exported in your shell before launching it won't reach ComfyUI unless ComfyUI itself was started from that same shell — see your launch script):
 
