@@ -846,7 +846,32 @@ class LinkerManagerDialog extends ComfyDialog {
             $el("span.ml-btn-icon", { textContent: "🔗" }),
             $el("span", { textContent: " Auto-Link 100%" })
         ]);
-        
+
+        // Off by default: HuggingFace downloads try anonymously first and only
+        // send a token (from HF_TOKEN / HUGGING_FACE_HUB_TOKEN) if a model turns
+        // out to be gated. Checking this sends it on every HF download from the
+        // start instead, which can help avoid throttling on a fast connection.
+        this.sendTokenCheckbox = $el("label", {
+            style: {
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                fontSize: "12px",
+                color: "var(--ml-text-muted, #999)",
+                cursor: "pointer",
+                marginRight: "auto",
+                userSelect: "none"
+            },
+            title: "Off by default: HuggingFace downloads are anonymous unless a model turns out to be gated. Check this to always send a HuggingFace token (from HF_TOKEN / HUGGING_FACE_HUB_TOKEN) up front, which can help mitigate throttling on a fast connection."
+        }, [
+            $el("input", {
+                type: "checkbox",
+                checked: this.isSendHfTokenEnabled(),
+                onchange: (e) => this.setSendHfTokenEnabled(e.target.checked)
+            }),
+            $el("span", { textContent: "Always send HF token" })
+        ]);
+
         return $el("div.ml-footer", {
             style: {
                 position: "sticky",
@@ -856,9 +881,23 @@ class LinkerManagerDialog extends ComfyDialog {
                 WebkitBackdropFilter: "blur(8px)"
             }
         }, [
+            this.sendTokenCheckbox,
             this.autoResolveButton,
             this.downloadAllButton
         ]);
+    }
+
+    /**
+     * Whether HF downloads should always send an auth token up front rather
+     * than only escalating to one after a gated/401/403 response. Off by
+     * default -- see createFooter().
+     */
+    isSendHfTokenEnabled() {
+        return localStorage.getItem('modelLinker.alwaysSendHfToken') === 'true';
+    }
+
+    setSendHfTokenEnabled(enabled) {
+        localStorage.setItem('modelLinker.alwaysSendHfToken', enabled ? 'true' : 'false');
     }
     
     /**
@@ -2195,7 +2234,8 @@ class LinkerManagerDialog extends ComfyDialog {
                 body: JSON.stringify({
                     url: source.url,
                     filename: filename,
-                    category: category
+                    category: category,
+                    send_hf_token: this.isSendHfTokenEnabled()
                 })
             });
 
@@ -2559,7 +2599,7 @@ class LinkerManagerDialog extends ComfyDialog {
             const response = await api.fetchApi('/model_linker/download', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, filename, category })
+                body: JSON.stringify({ url, filename, category, send_hf_token: this.isSendHfTokenEnabled() })
             });
 
             if (!response.ok) {

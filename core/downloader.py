@@ -428,20 +428,49 @@ def start_background_download(
     filename: str,
     category: str,
     headers: Optional[Dict[str, str]] = None,
-    subfolder: str = ""
+    subfolder: str = "",
+    send_hf_token: bool = False
 ) -> str:
     """
     Start a download in a background thread.
-    
+
+    HuggingFace URLs are routed to the huggingface_hub-backed engine
+    (core/hf_downloader.py); everything else (CivitAI, direct URLs) keeps
+    using the single-stream requests loop below, unchanged.
+
     Returns:
         download_id for tracking progress
     """
+    if 'huggingface.co' in url or url.startswith('hf://'):
+        from .sources.huggingface import parse_huggingface_url
+        parsed = parse_huggingface_url(url)
+        if parsed:
+            dest_dir = get_download_directory(category)
+            if dest_dir:
+                if subfolder:
+                    dest_dir = os.path.join(dest_dir, subfolder)
+                dest_path = os.path.join(dest_dir, filename)
+                # Same "don't clobber an existing file" contract download_model
+                # enforces below; falling through to it (rather than duplicating
+                # the error-reporting here) keeps that behavior in one place.
+                if not os.path.exists(dest_path):
+                    from .hf_downloader import start_background_hf_download
+                    return start_background_hf_download(
+                        repo_id=parsed['repo'],
+                        filename=parsed['filename'],
+                        dest_dir=dest_dir,
+                        dest_filename=filename,
+                        revision=parsed.get('branch', 'main'),
+                        send_token=send_hf_token,
+                        display_url=url,
+                    )
+
     download_id = generate_download_id()
-    
+
     def run_download():
         download_model(url, filename, category, download_id, headers, subfolder)
-    
+
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
-    
+
     return download_id

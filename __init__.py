@@ -361,24 +361,27 @@ class ModelLinkerExtension:
                                 status=400
                             )
                         
-                        # Build headers if needed
+                        # Build headers if needed. HuggingFace URLs are routed to the
+                        # huggingface_hub-backed engine by start_background_download,
+                        # which resolves its own auth (env var, escalating only on a
+                        # gated/401/403 response) -- send_hf_token is the "always send"
+                        # opt-in checkbox, off by default. CivitAI keeps the legacy
+                        # token-in-URL scheme untouched.
                         headers = {}
-                        if 'huggingface.co' in url:
-                            hf_token = data.get('hf_token', '')
-                            if hf_token:
-                                headers['Authorization'] = f'Bearer {hf_token}'
-                        elif 'civitai.com' in url:
+                        send_hf_token = bool(data.get('send_hf_token', False))
+                        if 'civitai.com' in url:
                             civitai_key = data.get('civitai_key', '')
                             if civitai_key and 'token=' not in url:
                                 url += f"{'&' if '?' in url else '?'}token={civitai_key}"
-                        
+
                         # Start background download
                         download_id = start_background_download(
                             url=url,
                             filename=filename,
                             category=category,
                             headers=headers if headers else None,
-                            subfolder=subfolder
+                            subfolder=subfolder,
+                            send_hf_token=send_hf_token
                         )
                         
                         return web.json_response({
