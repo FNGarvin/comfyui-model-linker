@@ -454,16 +454,25 @@ def start_background_download(
                 # enforces below; falling through to it (rather than duplicating
                 # the error-reporting here) keeps that behavior in one place.
                 if not os.path.exists(dest_path):
-                    from .hf_downloader import start_background_hf_download
-                    return start_background_hf_download(
-                        repo_id=parsed['repo'],
-                        filename=parsed['filename'],
-                        dest_dir=dest_dir,
-                        dest_filename=filename,
-                        revision=parsed.get('branch', 'main'),
-                        send_token=send_hf_token,
-                        display_url=url,
-                    )
+                    try:
+                        from .hf_downloader import start_background_hf_download
+                    except ImportError as e:
+                        # Degrade to the classic single-stream engine below
+                        # rather than hard-failing the whole request -- a
+                        # missing/broken hf_downloader.py (corrupted install,
+                        # AV quarantine, etc.) shouldn't take HF downloads
+                        # down entirely when the old engine still works fine.
+                        logger.warning(f"HF engine unavailable ({e}), falling back to classic downloader")
+                    else:
+                        return start_background_hf_download(
+                            repo_id=parsed['repo'],
+                            filename=parsed['filename'],
+                            dest_dir=dest_dir,
+                            dest_filename=filename,
+                            revision=parsed.get('branch', 'main'),
+                            send_token=send_hf_token,
+                            display_url=url,
+                        )
 
     download_id = generate_download_id()
 
