@@ -432,6 +432,19 @@ class ModelLinkerExtension:
                             status=500
                         )
                 
+                @routes.get("/model_linker/hf_token_status")
+                async def hf_token_status(request):
+                    """Whether HF_TOKEN / HUGGING_FACE_HUB_TOKEN is set in the
+                    environment ComfyUI is running in -- never the token value
+                    itself, just whether the "Always send HF token" checkbox
+                    would actually have something to send."""
+                    try:
+                        from .core.hf_downloader import _resolve_env_token
+                        return web.json_response({'detected': _resolve_env_token() is not None})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker hf_token_status error: {e}", exc_info=True)
+                        return web.json_response({'detected': False, 'error': str(e)}, status=500)
+
                 @routes.post("/model_linker/cancel/{download_id}")
                 async def cancel_download_route(request):
                     """Cancel a download in progress."""

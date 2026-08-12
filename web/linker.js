@@ -869,8 +869,10 @@ class LinkerManagerDialog extends ComfyDialog {
                 checked: this.isSendHfTokenEnabled(),
                 onchange: (e) => this.setSendHfTokenEnabled(e.target.checked)
             }),
-            $el("span", { textContent: "Always send HF token" })
+            $el("span", { textContent: "Always send HF token" }),
+            this.hfTokenStatusSpan = $el("span", { textContent: "" })
         ]);
+        this.refreshHfTokenStatus();
 
         return $el("div.ml-footer", {
             style: {
@@ -899,7 +901,31 @@ class LinkerManagerDialog extends ComfyDialog {
     setSendHfTokenEnabled(enabled) {
         localStorage.setItem('modelLinker.alwaysSendHfToken', enabled ? 'true' : 'false');
     }
-    
+
+    /**
+     * Checks whether HF_TOKEN / HUGGING_FACE_HUB_TOKEN is actually set in
+     * the environment ComfyUI is running in, and reflects it next to the
+     * "Always send HF token" checkbox -- so checking the box when nothing
+     * is there to send isn't a silent no-op.
+     */
+    async refreshHfTokenStatus() {
+        if (!this.hfTokenStatusSpan) return;
+        try {
+            const response = await api.fetchApi('/model_linker/hf_token_status');
+            const data = await response.json();
+            if (data.detected) {
+                this.hfTokenStatusSpan.textContent = '(detected)';
+                this.hfTokenStatusSpan.style.color = '#4CAF50';
+            } else {
+                this.hfTokenStatusSpan.textContent = '(not detected)';
+                this.hfTokenStatusSpan.style.color = '#dc3545';
+            }
+        } catch (error) {
+            console.error('Model Linker: Error checking HF token status:', error);
+            this.hfTokenStatusSpan.textContent = '';
+        }
+    }
+
     /**
      * Handle click on Download All / Cancel All button
      */

@@ -101,6 +101,20 @@ def _staging_dir(dest_dir: str, download_id: str) -> str:
     return os.path.join(dest_dir, f'.model_linker_tmp_{download_id}')
 
 
+def _staged_bytes(staging_dir: str) -> int:
+    """Sum of every file's size under the staging directory -- the actual
+    ground truth for "how much has been downloaded so far", independent of
+    whatever progress-callback granularity the download engine provides."""
+    total = 0
+    for root, _dirs, files in os.walk(staging_dir):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass  # file being written/renamed mid-stat -- picked up next poll
+    return total
+
+
 def _pipe_reader(pipe, out_queue):
     """Runs in its own thread; forwards lines from a subprocess pipe into a
     plain thread-safe queue.Queue so the caller can poll with a timeout
@@ -217,10 +231,35 @@ def download_hf_model(
     result_path = None
     error_msg = None
     cancelled = False
+    total_size = 0
     last_downloaded = 0
     last_speed_time = start_time
     speed = 0.0
     last_cli_log = start_time
+
+    def _poll_disk_progress():
+        # Ground truth for "how much is actually downloaded" -- Xet's native
+        # progress callback is staged/coarse (a handful of calls across the
+        # whole transfer, not a smooth per-chunk stream the way the old
+        # sequential requests.iter_content() loop produced), so this doesn't
+        # depend on hf_xet's callback cadence at all. It just stats whatever
+        # bytes have actually landed under the staging directory so far.
+        nonlocal last_downloaded, last_speed_time, speed, last_cli_log
+        n = _staged_bytes(staging)
+        now = time.time()
+        dt = now - last_speed_time
+        if dt > 0:
+            speed = max(0.0, (n - last_downloaded) / dt)
+        last_downloaded, last_speed_time = n, now
+        with download_lock:
+            download_progress[download_id]['downloaded'] = n
+            download_progress[download_id]['speed'] = int(speed)
+            if total_size:
+                download_progress[download_id]['progress'] = min(100, int(n / total_size * 100))
+        if now - last_cli_log >= 5:
+            last_cli_log = now
+            total_str = format_bytes(total_size) if total_size else "?"
+            _safe_print(f"[Model Linker] Progress: {format_bytes(n)} / {total_str} - {format_bytes(int(speed))}/s")
 
     while True:
         if download_id in cancelled_downloads:
@@ -229,6 +268,7 @@ def download_hf_model(
         try:
             line = stdout_queue.get(timeout=0.5)
         except queue_mod.Empty:
+            _poll_disk_progress()
             continue
         if line is None:
             break  # pipe closed, worker is done producing output
@@ -242,22 +282,11 @@ def download_hf_model(
 
         event = msg.get("event")
         if event == "progress":
-            n, total = msg.get("n", 0), msg.get("total", 0)
-            now = time.time()
-            dt = now - last_speed_time
-            if dt > 0:
-                speed = (n - last_downloaded) / dt
-            last_downloaded, last_speed_time = n, now
-            with download_lock:
-                download_progress[download_id]['downloaded'] = n
-                download_progress[download_id]['total_size'] = total
-                download_progress[download_id]['speed'] = int(speed)
-                if total:
-                    download_progress[download_id]['progress'] = int(n / total * 100)
-            if now - last_cli_log >= 5:
-                last_cli_log = now
-                total_str = format_bytes(total) if total else "?"
-                _safe_print(f"[Model Linker] Progress: {format_bytes(n)} / {total_str} - {format_bytes(int(speed))}/s")
+            if msg.get("total"):
+                total_size = msg.get("total")
+                with download_lock:
+                    download_progress[download_id]['total_size'] = total_size
+            _poll_disk_progress()
         elif event == "retrying":
             _safe_print(f"[Model Linker] {filename_display} is gated -- retrying with token from environment")
         elif event == "done":
