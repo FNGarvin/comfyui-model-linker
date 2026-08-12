@@ -10,6 +10,30 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { $el, ComfyDialog } from "../../../scripts/ui.js";
 
+/**
+ * Escapes a value for safe interpolation into innerHTML template strings,
+ * both as element text and inside a quoted HTML attribute.
+ *
+ * Needed anywhere a string from outside this extension's own control flow
+ * -- a workflow's node/widget values, or a HuggingFace/CivitAI/model-list
+ * search result -- gets written into innerHTML. Both are attacker-reachable:
+ * a shared workflow file can carry an arbitrary crafted filename, and
+ * HuggingFace/CivitAI are open platforms where anyone can name a repo or
+ * upload a listing with an arbitrary string. Missing models are rendered
+ * automatically the moment a workflow loads (see checkAndOpenForMissingModels),
+ * so an unescaped value here is a stored-XSS trigger with no further user
+ * action required.
+ */
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 class LinkerManagerDialog extends ComfyDialog {
     constructor() {
         super();
@@ -1528,10 +1552,14 @@ class LinkerManagerDialog extends ComfyDialog {
         const perfectMatches = filteredMatches.filter(m => m.confidence === 100 && !m.category_mismatch);
         const otherMatches = filteredMatches.filter(m => !(m.confidence === 100 && !m.category_mismatch));
         
-        // Show the missing filename in full (word-break handles long paths)
-        const missingFilename = missing.original_path || 'Unknown';
-        
-        // Determine node info for the chip
+        // Show the missing filename in full (word-break handles long paths).
+        // original_path comes straight out of the workflow JSON -- fully
+        // attacker-controlled by whoever crafted the workflow -- so it must
+        // be escaped before it ever reaches innerHTML.
+        const missingFilename = escapeHtml(missing.original_path || 'Unknown');
+
+        // Determine node info for the chip. node_type/subgraph_name are also
+        // workflow-controlled.
         const isSubgraphNode = missing.node_type && missing.node_type.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
         let nodeLabel;
         if (missing.subgraph_name) {
@@ -1541,7 +1569,10 @@ class LinkerManagerDialog extends ComfyDialog {
         } else {
             nodeLabel = missing.node_type || 'Node';
         }
-        
+        nodeLabel = escapeHtml(nodeLabel);
+        const nodeId = escapeHtml(missing.node_id);
+        const widgetIndex = escapeHtml(missing.widget_index);
+
         // Start card - green highlight when a usable 100% match exists
         const hasExactMatch = perfectMatches.length > 0;
         let html = `<div class="ml-card ${hasExactMatch ? 'ml-card-resolved' : ''}">`;
@@ -1551,14 +1582,14 @@ class LinkerManagerDialog extends ComfyDialog {
         html += `<h3 class="ml-card-title">${missingFilename}</h3>`;
         html += `<div style="display: flex; align-items: center; gap: 6px;">`;
         if (missing.category) {
-            html += `<span class="ml-category-chip">${missing.category}</span>`;
+            html += `<span class="ml-category-chip">${escapeHtml(missing.category)}</span>`;
         }
         const refCount = (missing.all_node_refs || [missing]).length;
         const jumpLabel = refCount > 1 ? `↗ Jump to node (${refCount})` : '↗ Jump to node';
         const jumpTitle = refCount > 1
-            ? `${nodeLabel} #${missing.node_id} - ${refCount} nodes use this model, click again for the next one`
-            : `${nodeLabel} #${missing.node_id}`;
-        html += `<span id="jump-${missing.node_id}-${missing.widget_index}" class="ml-node-chip ml-node-chip-clickable" title="${jumpTitle}">${jumpLabel}</span>`;
+            ? `${nodeLabel} #${nodeId} - ${refCount} nodes use this model, click again for the next one`
+            : `${nodeLabel} #${nodeId}`;
+        html += `<span id="jump-${nodeId}-${widgetIndex}" class="ml-node-chip ml-node-chip-clickable" title="${jumpTitle}">${jumpLabel}</span>`;
         html += `</div>`;
         html += `</div>`;
         
@@ -1584,15 +1615,15 @@ class LinkerManagerDialog extends ComfyDialog {
             
             for (let matchIndex = 0; matchIndex < sortedMatches.length; matchIndex++) {
                 const match = sortedMatches[matchIndex];
-                const buttonId = `resolve-${missing.node_id}-${missing.widget_index}-${matchIndex}`;
-                const matchPath = match.model?.relative_path || match.filename || '';
+                const buttonId = `resolve-${nodeId}-${widgetIndex}-${matchIndex}`;
+                const matchPath = escapeHtml(match.model?.relative_path || match.filename || '');
                 const isBestMatch = matchIndex === 0 && match.confidence >= 95;
-                
+
                 html += `<div class="ml-match-row ${isBestMatch ? 'ml-best-match' : ''}">`;
                 html += this.getConfidenceBadge(match.confidence);
                 if (match.category_mismatch) {
-                    const expected = (match.expected_categories || []).filter(Boolean).join(', ') || 'another folder';
-                    const foundIn = match.model?.category || 'unknown';
+                    const expected = escapeHtml((match.expected_categories || []).filter(Boolean).join(', ') || 'another folder');
+                    const foundIn = escapeHtml(match.model?.category || 'unknown');
                     html += `<span class="ml-wrong-folder" title="Found in '${foundIn}' but this node loads from '${expected}'. Move the file there, or link it knowing the node may fail to load it.">⚠ wrong folder</span>`;
                 }
                 html += `<span class="ml-match-filename">${matchPath}</span>`;
@@ -1636,27 +1667,30 @@ class LinkerManagerDialog extends ComfyDialog {
                 'workflow': 'Workflow'
             };
             const sourceLabel = isFromWorkflow ? 'Workflow' : (sourceLabels[downloadSource.source] || 'Online');
-            const downloadFilename = downloadSource.filename || filename;
-            
+            // filename/name fields on download_source come from the workflow,
+            // or from a HuggingFace/CivitAI/model-list search result -- all
+            // attacker-reachable, must be escaped before rendering.
+            const downloadFilename = escapeHtml(downloadSource.filename || filename);
+
             // Format file size
             let sizeDisplay = '';
             if (downloadSource.size) {
                 if (typeof downloadSource.size === 'number') {
                     sizeDisplay = this.formatBytes(downloadSource.size);
                 } else {
-                    sizeDisplay = downloadSource.size;
+                    sizeDisplay = escapeHtml(downloadSource.size);
                 }
             }
-            
+
             html += `<div class="ml-download-section">`;
-            html += `<button id="download-${missing.node_id}-${missing.widget_index}" class="ml-btn ml-btn-download">`;
+            html += `<button id="download-${nodeId}-${widgetIndex}" class="ml-btn ml-btn-download">`;
             html += `<span class="ml-btn-icon">☁</span> Download${sizeDisplay ? ` (${sizeDisplay})` : ''}`;
             html += `</button>`;
             html += `<div class="ml-download-info">`;
             html += `<span class="ml-download-source">${isFromWorkflow ? 'URL from workflow' : sourceLabel}</span>`;
             const modelCardUrl = this.getModelCardUrl(downloadSource.url);
             if (modelCardUrl) {
-                html += `<br><a href="${modelCardUrl}" target="_blank" rel="noopener noreferrer" class="ml-link" style="word-break: break-all;" title="Open model card">${downloadFilename}</a>`;
+                html += `<br><a href="${escapeHtml(modelCardUrl)}" target="_blank" rel="noopener noreferrer" class="ml-link" style="word-break: break-all;" title="Open model card">${downloadFilename}</a>`;
             } else {
                 html += `<br><span style="word-break: break-all;">${downloadFilename}</span>`;
             }
@@ -1665,16 +1699,16 @@ class LinkerManagerDialog extends ComfyDialog {
         } else {
             // No known download - offer search
             html += `<div class="ml-download-section">`;
-            html += `<button id="search-${missing.node_id}-${missing.widget_index}" class="ml-btn ml-btn-link">`;
+            html += `<button id="search-${nodeId}-${widgetIndex}" class="ml-btn ml-btn-link">`;
             html += `<span class="ml-btn-icon">🔍</span> Search Online`;
             html += `</button>`;
             html += `<div class="ml-download-info">Search HuggingFace & CivitAI</div>`;
             html += `</div>`;
-            html += `<div id="search-results-${missing.node_id}-${missing.widget_index}" style="margin-top: 8px; display: none;"></div>`;
+            html += `<div id="search-results-${nodeId}-${widgetIndex}" style="margin-top: 8px; display: none;"></div>`;
         }
-        
+
         // Progress container (for downloads)
-        html += `<div id="download-progress-${missing.node_id}-${missing.widget_index}" style="margin-top: 8px; display: none;"></div>`;
+        html += `<div id="download-progress-${nodeId}-${widgetIndex}" style="margin-top: 8px; display: none;"></div>`;
         
         html += `</div>`; // End right column
         html += `</div>`; // End columns
