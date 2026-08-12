@@ -30,6 +30,33 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 4. Link individual matches, use **Auto-Link** for all 100% matches, or **Download All Missing** for models with known sources
 5. Save your workflow when ready
 
+## HuggingFace authentication
+
+Downloads from HuggingFace are **anonymous by default** — a token is only ever sent if a model turns out to be gated (license click-through required) and one is available, or if you explicitly opt in. Model Linker never reads your `hf auth login` session (the cached token file the HuggingFace CLI stores in your home folder); a long-running shell login shouldn't silently leak into a download you didn't expect it to touch.
+
+**If a download fails with "this model is gated"**, set a token in the environment ComfyUI itself runs in (not just your shell — see below), then retry. If nothing's configured there, that's the only case a gated download can't complete on its own.
+
+**"Always send HF token" checkbox** (in the Missing Models dialog's footer): off by default. Turning it on sends your token on every HuggingFace download from the start instead of only when a model is actually gated. Not required for correctness — anonymous downloads work fine for public models — but authenticated requests can get better treatment from HuggingFace's CDN under load, so it's worth enabling if you're pulling a lot of models on a fast connection and want to avoid anonymous rate limits. The checkbox shows **(detected)** in green or **(not detected)** in red next to it, so you can tell at a glance whether a token is actually available to send before you bother checking it.
+
+### Providing a token
+
+Set either of these in the environment ComfyUI's process runs in (an env var exported in your shell before launching it won't reach ComfyUI unless ComfyUI itself was started from that same shell — see your launch script):
+
+- `HF_TOKEN` (preferred)
+- `HUGGING_FACE_HUB_TOKEN` (older name, kept for compatibility with other tools)
+
+For example, added to whatever script launches ComfyUI:
+```bat
+:: Windows batch
+set "HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+```bash
+# Linux/macOS shell
+export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+Don't have a token yet? Generate one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — a **Read**-scoped token is sufficient, no write access needed. You'll also need to visit the gated model's page on HuggingFace at least once and accept its license terms before a token grants access to it.
+
 ## License
 
 [MIT](LICENSE)
