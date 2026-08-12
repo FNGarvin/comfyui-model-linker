@@ -21,6 +21,7 @@ import json
 import shutil
 import tempfile
 import types
+import contextlib
 from types import SimpleNamespace
 from unittest import mock
 
@@ -292,6 +293,12 @@ def test_dispatch_leaves_civitai_url_on_legacy_path():
 
 
 # --- _hf_worker: the anonymous-first / escalate-only-when-mandatory logic -
+#
+# The auth checkpoint lives around get_hf_file_metadata() (the first network
+# call main() makes), not around hf_hub_download() -- the same resolved
+# token is then reused for whichever download path (Xet or classic) gets
+# taken afterward, since HF enforces gating consistently across both
+# endpoints. See _hf_worker.py's module docstring for the full picture.
 
 def _fake_response(status_code):
     """HfHubHTTPError.__init__ reads response.headers.get(...) and
@@ -302,17 +309,26 @@ def _fake_response(status_code):
     return SimpleNamespace(status_code=status_code, headers={}, request=None)
 
 
-def _run_worker_main(request, hf_hub_download_mock):
-    """Runs core._hf_worker.main() in-process with stdin/stdout swapped
-    for StringIO buffers and huggingface_hub.hf_hub_download mocked out.
-    Returns the list of parsed JSON events it emitted."""
+def _fake_metadata(size=100, xet_file_data=None, etag='abc123'):
+    return SimpleNamespace(size=size, etag=etag, xet_file_data=xet_file_data)
+
+
+def _run_worker_main(request, get_metadata_mock, hf_hub_download_mock=None):
+    """Runs core._hf_worker.main() in-process with stdin/stdout swapped for
+    StringIO buffers and huggingface_hub's network-calling functions mocked
+    out. Returns the list of parsed JSON events it emitted."""
     from core import _hf_worker as worker
 
     old_stdin, old_stdout = sys.stdin, sys.stdout
     sys.stdin = io.StringIO(json.dumps(request) + "\n")
     sys.stdout = io.StringIO()
     try:
-        with mock.patch('huggingface_hub.hf_hub_download', hf_hub_download_mock):
+        patches = [mock.patch('huggingface_hub.get_hf_file_metadata', get_metadata_mock)]
+        if hf_hub_download_mock is not None:
+            patches.append(mock.patch('huggingface_hub.hf_hub_download', hf_hub_download_mock))
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
             worker.main()
         output = sys.stdout.getvalue()
     finally:
@@ -321,54 +337,60 @@ def _run_worker_main(request, hf_hub_download_mock):
     return [json.loads(line) for line in output.splitlines() if line.strip()]
 
 
-def test_worker_escalates_once_on_gated_response_when_fallback_available():
+def _skip_without_huggingface_hub(test_name):
     try:
         import huggingface_hub  # noqa: F401
-        from huggingface_hub.errors import HfHubHTTPError
+        from huggingface_hub.errors import HfHubHTTPError  # noqa: F401
+        return False
     except ImportError:
-        print('SKIP test_worker_escalates_once_on_gated_response_when_fallback_available '
-              '(huggingface_hub not installed)')
+        print(f'SKIP {test_name} (huggingface_hub not installed)')
+        return True
+
+
+def test_worker_escalates_metadata_fetch_once_on_gated_response_when_fallback_available():
+    if _skip_without_huggingface_hub('test_worker_escalates_metadata_fetch_once_on_gated_response_when_fallback_available'):
         return
+    from huggingface_hub.errors import HfHubHTTPError
 
     calls = []
 
+    def fake_get_metadata(url, token=None, **kwargs):
+        calls.append(token)
+        if token is False:
+            raise HfHubHTTPError('gated', response=_fake_response(403))
+        return _fake_metadata()  # xet_file_data=None -> classic path
+
     def fake_download(**kwargs):
-        calls.append(kwargs['token'])
-        if kwargs['token'] is False:
-            err = HfHubHTTPError('gated', response=_fake_response(403))
-            raise err
+        assert kwargs['token'] == 'env-token-value', 'the escalated token must carry through to the download itself'
         return '/staging/model.safetensors'
 
     events = _run_worker_main(
         {"repo_id": "u/r", "filename": "model.safetensors", "local_dir": "/staging",
          "token": False, "fallback_token": "env-token-value"},
-        fake_download,
+        fake_get_metadata, fake_download,
     )
 
     assert calls == [False, 'env-token-value'], 'must try anonymous first, only escalate after a 403'
     kinds = [e['event'] for e in events]
     assert 'retrying' in kinds
-    assert events[-1] == {"event": "done", "path": "/staging/model.safetensors"}
+    assert events[-1]["event"] == "done" and events[-1]["path"] == "/staging/model.safetensors"
 
 
-def test_worker_does_not_retry_without_a_fallback_token():
-    try:
-        import huggingface_hub  # noqa: F401
-        from huggingface_hub.errors import HfHubHTTPError
-    except ImportError:
-        print('SKIP test_worker_does_not_retry_without_a_fallback_token (huggingface_hub not installed)')
+def test_worker_does_not_retry_metadata_without_a_fallback_token():
+    if _skip_without_huggingface_hub('test_worker_does_not_retry_metadata_without_a_fallback_token'):
         return
+    from huggingface_hub.errors import HfHubHTTPError
 
     calls = []
 
-    def fake_download(**kwargs):
-        calls.append(kwargs['token'])
+    def fake_get_metadata(url, token=None, **kwargs):
+        calls.append(token)
         raise HfHubHTTPError('gated', response=_fake_response(403))
 
     events = _run_worker_main(
         {"repo_id": "u/r", "filename": "model.safetensors", "local_dir": "/staging",
          "token": False, "fallback_token": None},
-        fake_download,
+        fake_get_metadata,
     )
 
     assert calls == [False], 'no token to fall back to -- must not retry'
@@ -376,18 +398,15 @@ def test_worker_does_not_retry_without_a_fallback_token():
     assert 'gated' in events[-1]['message'].lower()
 
 
-def test_worker_never_escalates_when_a_token_was_already_sent():
-    try:
-        import huggingface_hub  # noqa: F401
-        from huggingface_hub.errors import HfHubHTTPError
-    except ImportError:
-        print('SKIP test_worker_never_escalates_when_a_token_was_already_sent (huggingface_hub not installed)')
+def test_worker_never_escalates_metadata_when_a_token_was_already_sent():
+    if _skip_without_huggingface_hub('test_worker_never_escalates_metadata_when_a_token_was_already_sent'):
         return
+    from huggingface_hub.errors import HfHubHTTPError
 
     calls = []
 
-    def fake_download(**kwargs):
-        calls.append(kwargs['token'])
+    def fake_get_metadata(url, token=None, **kwargs):
+        calls.append(token)
         raise HfHubHTTPError('unauthorized', response=_fake_response(401))
 
     # "Always send" checkbox path: token is already a real string on the
@@ -396,12 +415,128 @@ def test_worker_never_escalates_when_a_token_was_already_sent():
     events = _run_worker_main(
         {"repo_id": "u/r", "filename": "model.safetensors", "local_dir": "/staging",
          "token": "already-sent-token", "fallback_token": "env-token-value"},
-        fake_download,
+        fake_get_metadata,
     )
 
     assert calls == ['already-sent-token']
     assert events[-1]['event'] == 'error'
     assert 'rejected' in events[-1]['message'].lower()
+
+
+def test_worker_non_xet_file_uses_hf_hub_download():
+    if _skip_without_huggingface_hub('test_worker_non_xet_file_uses_hf_hub_download'):
+        return
+
+    def fake_get_metadata(url, token=None, **kwargs):
+        return _fake_metadata(xet_file_data=None)  # not Xet-hosted
+
+    def fake_download(**kwargs):
+        assert kwargs['token'] is False
+        return '/staging/plain.safetensors'
+
+    events = _run_worker_main(
+        {"repo_id": "u/r", "filename": "plain.safetensors", "local_dir": "/staging",
+         "token": False, "fallback_token": None},
+        fake_get_metadata, fake_download,
+    )
+
+    assert events[-1]["event"] == "done" and events[-1]["path"] == "/staging/plain.safetensors"
+
+
+def test_worker_xet_path_downloads_and_reports_real_progress():
+    if _skip_without_huggingface_hub('test_worker_xet_path_downloads_and_reports_real_progress'):
+        return
+
+    tmp = tempfile.mkdtemp(prefix='xet_worker_test_')
+    try:
+        xet_data = SimpleNamespace(file_hash='deadbeef', refresh_route='https://example.com/refresh')
+
+        def fake_get_metadata(url, token=None, **kwargs):
+            return _fake_metadata(size=1000, xet_file_data=xet_data)
+
+        class _FakeGroup:
+            """Mirrors the real hf_xet behavior confirmed empirically:
+            nothing lands on disk until wait_to_finish() completes, and
+            progress() returns an increasing sequence across calls."""
+
+            def __init__(self):
+                self._sequence = [0, 400, 1000]
+                self._i = 0
+                self._dest = None
+
+            def start_download_file(self, file_info, dest_path):
+                self._dest = dest_path
+
+            def progress(self):
+                completed = self._sequence[min(self._i, len(self._sequence) - 1)]
+                self._i += 1
+                return SimpleNamespace(total_bytes_completed=completed, total_bytes=1000,
+                                        total_bytes_completion_rate=500.0)
+
+            def wait_to_finish(self):
+                import time as _time
+                _time.sleep(0.35)  # give the 0.3s poll loop at least one real tick
+                with open(self._dest, 'wb') as f:
+                    f.write(b'x' * 1000)
+                return SimpleNamespace(files=1)
+
+        fake_group = _FakeGroup()
+        fake_session = mock.Mock()
+        fake_session.new_file_download_group.return_value = fake_group
+        fake_hf_xet = mock.Mock()
+        fake_hf_xet.XetSession.return_value = fake_session
+        fake_hf_xet.XetFileInfo = lambda hash, file_size=None: SimpleNamespace(hash=hash, file_size=file_size)
+
+        saved_hf_xet = sys.modules.get('hf_xet')
+        sys.modules['hf_xet'] = fake_hf_xet
+        try:
+            with mock.patch('huggingface_hub.utils._xet.refresh_xet_connection_info',
+                             return_value=SimpleNamespace(endpoint='https://cas.example.com',
+                                                           access_token='tok', expiration_unix_epoch=0)):
+                events = _run_worker_main(
+                    {"repo_id": "u/r", "filename": "model.safetensors", "local_dir": tmp,
+                     "token": False, "fallback_token": None},
+                    fake_get_metadata,
+                )
+        finally:
+            if saved_hf_xet is not None:
+                sys.modules['hf_xet'] = saved_hf_xet
+            else:
+                sys.modules.pop('hf_xet', None)
+
+        kinds = [e['event'] for e in events]
+        assert 'done' in kinds
+        progress_events = [e for e in events if e['event'] == 'progress']
+        assert any(e['n'] > 0 for e in progress_events), 'must report real, nonzero progress before completion'
+        done = [e for e in events if e['event'] == 'done'][0]
+        assert os.path.exists(done['path'])
+        assert os.path.getsize(done['path']) == 1000
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_worker_xet_path_failure_falls_back_to_hf_hub_download():
+    if _skip_without_huggingface_hub('test_worker_xet_path_failure_falls_back_to_hf_hub_download'):
+        return
+
+    xet_data = SimpleNamespace(file_hash='deadbeef', refresh_route='https://example.com/refresh')
+
+    def fake_get_metadata(url, token=None, **kwargs):
+        return _fake_metadata(size=1000, xet_file_data=xet_data)
+
+    def fake_download(**kwargs):
+        return '/staging/fallback.safetensors'
+
+    with mock.patch('huggingface_hub.utils._xet.refresh_xet_connection_info',
+                     side_effect=RuntimeError('xet connection refused')):
+        events = _run_worker_main(
+            {"repo_id": "u/r", "filename": "model.safetensors", "local_dir": "/staging",
+             "token": False, "fallback_token": None},
+            fake_get_metadata, fake_download,
+        )
+
+    assert events[-1]["event"] == "done" and events[-1]["path"] == "/staging/fallback.safetensors"
+    assert any(e['event'] == 'log' and 'falling back' in e.get('message', '') for e in events)
 
 
 if __name__ == '__main__':
