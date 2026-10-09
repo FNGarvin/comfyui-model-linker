@@ -60,6 +60,49 @@ class FakeCustomLoader:
         }
 
 
+class FakeEmptyFolderLoader:
+    """Loads from a folder that has no files yet - option matching can't work."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {'required': {'clip_name': (fp.get_filename_list('text_encoders'),)}}
+
+
+class FakeMergedListLoader:
+    """Prepends a 'None' choice to the folder list."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {'required': {'lora': (['None'] + fp.get_filename_list('loras'),)}}
+
+
+class FakeTwoFolderLoader:
+    """Two model combos from different folders plus a seed with its control widget."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'seed': ('INT', {'default': 0}),
+                'unet': (fp.get_filename_list('diffusion_models'),),
+                'image': ('IMAGE',),
+                'lora': ('COMBO', {'options': fp.get_filename_list('loras')}),
+            },
+        }
+
+
+class FakeThreadedLoader:
+    """Another thread asks folder_paths for a real list mid-trace."""
+    seen_from_other_thread = None
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        import threading
+        def worker():
+            cls.seen_from_other_thread = fp.get_filename_list('loras')
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        return {'required': {'ckpt': (fp.get_filename_list('checkpoints'),)}}
+
+
 class FakeNonModelNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -70,6 +113,10 @@ nodes_mod = types.ModuleType('nodes')
 nodes_mod.NODE_CLASS_MAPPINGS = {
     'FakeCustomLoader': FakeCustomLoader,
     'FakeNonModelNode': FakeNonModelNode,
+    'FakeEmptyFolderLoader': FakeEmptyFolderLoader,
+    'FakeMergedListLoader': FakeMergedListLoader,
+    'FakeTwoFolderLoader': FakeTwoFolderLoader,
+    'FakeThreadedLoader': FakeThreadedLoader,
 }
 sys.modules['nodes'] = nodes_mod
 
@@ -84,6 +131,42 @@ from core.workflow_analyzer import (  # noqa: E402
 
 def test_introspection_derives_category():
     assert get_node_model_categories('FakeCustomLoader') == ['diffusion_models']
+
+
+def test_tracing_finds_empty_folder():
+    assert get_node_model_categories('FakeEmptyFolderLoader') == ['text_encoders']
+
+
+def test_tracing_survives_merged_list():
+    assert get_node_model_categories('FakeMergedListLoader') == ['loras']
+
+
+def test_tracing_restores_folder_paths():
+    get_node_model_categories('FakeMergedListLoader')
+    assert fp.get_filename_list is get_filename_list
+    assert fp.get_filename_list('loras') == ['mylora.safetensors']
+
+
+def test_tracing_maps_each_widget_to_its_folder():
+    # widgets: seed(0), control_after_generate(1), unet(2), lora(3); image is a link
+    node = {'id': 20, 'type': 'FakeTwoFolderLoader',
+            'widgets_values': [42, 'fixed', 'gone_unet.safetensors', 'gone_lora.safetensors']}
+    refs = {r['widget_index']: r for r in get_node_model_info(node)}
+    assert refs[2]['expected_categories'] == ['diffusion_models']
+    assert refs[3]['expected_categories'] == ['loras']
+
+
+def test_tracing_falls_back_to_node_wide_categories():
+    # Saved values don't match the counted widgets -> node-wide list
+    node = {'id': 21, 'type': 'FakeTwoFolderLoader',
+            'widgets_values': ['gone_unet.safetensors']}
+    refs = get_node_model_info(node)
+    assert refs[0]['expected_categories'] == ['diffusion_models', 'loras']
+
+
+def test_tracing_does_not_leak_into_other_threads():
+    assert get_node_model_categories('FakeThreadedLoader') == ['checkpoints']
+    assert FakeThreadedLoader.seen_from_other_thread == ['mylora.safetensors']
 
 
 def test_introspection_non_model_node():

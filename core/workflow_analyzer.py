@@ -5,8 +5,11 @@ Extracts model references from workflow JSON and identifies missing models.
 """
 
 import os
+import re
+import sys
 import logging
-from typing import List, Dict, Any, Optional
+import threading
+from typing import List, Dict, Any, Optional, Tuple
 
 # Import folder_paths lazily - it may not be available until ComfyUI is initialized
 try:
@@ -59,64 +62,199 @@ def is_model_filename(value: Any) -> bool:
     return ext in MODEL_EXTENSIONS
 
 
-# Cache of node_type -> list of derived categories (or None when nothing
+# Cache of node_type -> derived model field info (or None when nothing
 # could be derived). Populated lazily; a failed introspection is cached too
 # so misbehaving custom nodes are only probed once per session.
-_NODE_MODEL_CATEGORIES_CACHE: Dict[str, Optional[List[str]]] = {}
+#   {'all': [categories], 'by_widget_index': {idx: [categories]},
+#    'widget_count': number of widgets the node's inputs produce}
+_NODE_MODEL_CATEGORIES_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+# Marker filenames handed out while tracing INPUT_TYPES(); they end in a
+# model extension so filters like `if f.endswith('.safetensors')` keep them
+_SENTINEL_PREFIX = '__model_linker_category__'
+_SENTINEL_PATTERN = re.compile(re.escape(_SENTINEL_PREFIX) + r'(\d+)__\.safetensors')
+_WIDGET_INPUT_TYPES = {'INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'}
+# The frontend adds a control_after_generate widget after these inputs
+_SEED_INPUT_NAMES = {'seed', 'noise_seed'}
+_trace_lock = threading.RLock()
 
 
-def get_node_model_categories(node_type: str) -> Optional[List[str]]:
+def get_node_model_field_info(node_type: str) -> Optional[Dict[str, Any]]:
     """
-    Derive the model folder categories a node type loads from by
-    introspecting its INPUT_TYPES() combo option lists.
+    Work out which inputs of a node type are model fields and which folder
+    category each one loads from (issue #5).
 
-    Custom loader nodes (Nunchaku, Hy3D, IPAdapter, ...) populate their file
-    combos from folder_paths.get_filename_list() at INPUT_TYPES() time, so
-    matching an input's option list back to a category's file list tells us
-    both that the input is a model field and which folder it loads from —
-    without hardcoding every node type (issue #5).
-
-    Returns:
-        List of category names, or None if nothing could be derived.
+    Custom loader nodes (Nunchaku, Hy3D, IPAdapter, GGUF, ...) build their
+    file combos by calling folder_paths.get_filename_list() inside
+    INPUT_TYPES(). We call INPUT_TYPES() with that function swapped for a
+    tracer returning one marker filename per call; wherever a marker shows
+    up in a combo, that combo loads from the traced category. This works
+    even when the folder is empty or the node merges/filters lists. Combos
+    filled some other way fall back to matching options against folders.
     """
     if node_type in _NODE_MODEL_CATEGORIES_CACHE:
         return _NODE_MODEL_CATEGORIES_CACHE[node_type]
 
-    categories = None
+    info = None
     try:
         import nodes as comfy_nodes
         node_class = comfy_nodes.NODE_CLASS_MAPPINGS.get(node_type)
         if node_class is not None:
-            categories = _derive_categories_from_input_types(node_class)
+            info = _derive_model_fields(node_class)
     except Exception as e:
         logging.debug(f"Model Linker: could not introspect {node_type}: {e}")
 
-    _NODE_MODEL_CATEGORIES_CACHE[node_type] = categories
-    return categories
+    _NODE_MODEL_CATEGORIES_CACHE[node_type] = info
+    return info
 
 
-def _derive_categories_from_input_types(node_class) -> Optional[List[str]]:
-    """Inspect a node class's INPUT_TYPES for combos of model filenames."""
-    input_types = node_class.INPUT_TYPES()
-    categories = []
+def get_node_model_categories(node_type: str) -> Optional[List[str]]:
+    """
+    All model folder categories a node type loads from.
+
+    Returns:
+        List of category names, or None if nothing could be derived.
+    """
+    info = get_node_model_field_info(node_type)
+    return info['all'] if info else None
+
+
+def _trace_input_types(node_class) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """
+    Call node_class.INPUT_TYPES() with folder_paths.get_filename_list traced.
+
+    Returns (input_types, {marker filename: category}). Only calls from this
+    thread are traced; other threads (e.g. a prompt being validated) still
+    get real file lists while the patch is in place.
+    """
+    global folder_paths
+    if folder_paths is None:
+        try:
+            import folder_paths as fp
+            folder_paths = fp
+        except ImportError:
+            return node_class.INPUT_TYPES(), {}
+
+    original = folder_paths.get_filename_list
+    tracer_thread = threading.get_ident()
+    markers: Dict[str, str] = {}
+
+    def traced_get_filename_list(folder_name, *args, **kwargs):
+        if threading.get_ident() != tracer_thread:
+            return original(folder_name, *args, **kwargs)
+        category = folder_name
+        map_legacy = getattr(folder_paths, 'map_legacy', None)
+        if callable(map_legacy):
+            category = map_legacy(folder_name)
+        marker = f"{_SENTINEL_PREFIX}{len(markers)}__.safetensors"
+        markers[marker] = category
+        return [marker]
+
+    # Nodes that did `from folder_paths import get_filename_list` hold their
+    # own reference, so also patch it in the globals of the defining code
+    namespaces = []
+    for attr in ('INPUT_TYPES', 'define_schema'):
+        func = getattr(getattr(node_class, attr, None), '__func__', None)
+        func_globals = getattr(func, '__globals__', None)
+        if isinstance(func_globals, dict):
+            namespaces.append(func_globals)
+    module = sys.modules.get(getattr(node_class, '__module__', ''))
+    if module is not None:
+        namespaces.append(module.__dict__)
+
+    with _trace_lock:
+        patched = []
+        folder_paths.get_filename_list = traced_get_filename_list
+        try:
+            for namespace in namespaces:
+                for name, value in list(namespace.items()):
+                    if value is original:
+                        namespace[name] = traced_get_filename_list
+                        patched.append((namespace, name))
+            input_types = node_class.INPUT_TYPES()
+        finally:
+            folder_paths.get_filename_list = original
+            for namespace, name in patched:
+                namespace[name] = original
+
+    return input_types, markers
+
+
+def _combo_options(spec) -> Optional[list]:
+    """Option list of a combo input spec, in either the list or COMBO form."""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return None
+    if isinstance(spec[0], (list, tuple)):
+        return list(spec[0])
+    if spec[0] == 'COMBO' and len(spec) > 1 and isinstance(spec[1], dict):
+        options = spec[1].get('options')
+        if isinstance(options, (list, tuple)):
+            return list(options)
+    return None
+
+
+def _derive_model_fields(node_class) -> Optional[Dict[str, Any]]:
+    """Map a node class's widget indices to the model categories they load."""
+    input_types, markers = _trace_input_types(node_class)
+
+    all_categories: List[str] = []
+    by_widget_index: Dict[int, List[str]] = {}
+    widget_index = 0
 
     for section in ('required', 'optional'):
         inputs = input_types.get(section) or {}
-        for _name, spec in inputs.items():
-            options = spec[0] if isinstance(spec, (list, tuple)) and spec else None
-            if not isinstance(options, (list, tuple)) or not options:
+        for name, spec in inputs.items():
+            if not isinstance(spec, (list, tuple)) or not spec:
                 continue
-            if not all(isinstance(opt, str) for opt in options):
-                continue
-            # A combo whose options are model filenames is a model field
-            if not any(is_model_filename(opt) for opt in options):
-                continue
+            extra = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            options = _combo_options(spec)
+            is_widget = options is not None or (
+                isinstance(spec[0], str) and spec[0] in _WIDGET_INPUT_TYPES)
+            if not is_widget or extra.get('forceInput'):
+                continue  # a link input - doesn't occupy a widget slot
 
-            category = _find_category_for_options(options)
-            if category and category not in categories:
-                categories.append(category)
+            categories = _categories_for_options(options, markers) if options else []
+            if categories:
+                by_widget_index[widget_index] = categories
+                for category in categories:
+                    if category not in all_categories:
+                        all_categories.append(category)
 
-    return categories or None
+            widget_index += 1
+            if extra.get('control_after_generate') or (
+                    spec[0] == 'INT' and name in _SEED_INPUT_NAMES):
+                widget_index += 1
+
+    if not all_categories:
+        return None
+    return {
+        'all': all_categories,
+        'by_widget_index': by_widget_index,
+        'widget_count': widget_index,
+    }
+
+
+def _categories_for_options(options: list, markers: Dict[str, str]) -> List[str]:
+    """Categories a combo loads from: traced markers first, else folder matching."""
+    categories = []
+    for option in options:
+        if isinstance(option, str):
+            for match in _SENTINEL_PATTERN.finditer(option):
+                category = markers.get(match.group(0))
+                if category and category not in categories:
+                    categories.append(category)
+    if categories:
+        return categories
+
+    # Combo filled without get_filename_list (os.listdir, cached lists, ...):
+    # match its real option list back to a folder
+    real_options = [opt for opt in options if isinstance(opt, str)]
+    if real_options and len(real_options) == len(options) and any(
+            is_model_filename(opt) for opt in real_options):
+        category = _find_category_for_options(real_options)
+        if category:
+            return [category]
+    return []
 
 
 def _find_category_for_options(options) -> Optional[str]:
@@ -231,16 +369,28 @@ def get_node_model_info(node: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Get category hints for this node type: hardcoded table first, then
     # INPUT_TYPES introspection for custom loader nodes (issue #5)
     category_hint = NODE_TYPE_TO_CATEGORY_HINTS.get(node_type)
+    field_info = None
     if category_hint:
-        expected_categories = [category_hint]
+        node_categories = [category_hint]
     else:
-        expected_categories = get_node_model_categories(node_type)
-    categories_to_try = expected_categories  # None -> try all categories
+        field_info = get_node_model_field_info(node_type)
+        node_categories = field_info['all'] if field_info else None
+
+    # Per-widget categories only line up when the saved values match the
+    # widgets we counted; otherwise use the node-wide list
+    by_widget_index = None
+    if field_info and len(widgets_values) == field_info['widget_count']:
+        by_widget_index = field_info['by_widget_index']
 
     # For each widget value, check if it looks like a model file
     for idx, value in enumerate(widgets_values):
         if not is_model_filename(value):
             continue
+
+        expected_categories = node_categories
+        if by_widget_index and idx in by_widget_index:
+            expected_categories = by_widget_index[idx]
+        categories_to_try = expected_categories  # None -> try all categories
 
         # Try to resolve the model path
         resolved = try_resolve_model_path(value, categories_to_try)
