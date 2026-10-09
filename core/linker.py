@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 URL_PATTERN = re.compile(r'(https?://(?:huggingface\.co|civitai\.com)[^\s"\'<>\)\\]+)')
 
 # Model file extensions to look for
-MODEL_EXTENSIONS = ('.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.onnx')
+MODEL_EXTENSIONS = ('.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.onnx', '.gguf')
 
 
 def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -103,7 +103,7 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
             cleaned_urls.append(url)
     
     # 3. Extract model filenames via regex
-    model_pattern = re.compile(r'([\w\-\.%]+\.(?:safetensors|ckpt|pt|pth|bin|onnx))', re.IGNORECASE)
+    model_pattern = re.compile(r'([\w\-\.%]+\.(?:safetensors|ckpt|pt|pth|bin|onnx|gguf))', re.IGNORECASE)
     model_files_raw = model_pattern.findall(workflow_str)
     
     # Clean and decode filenames

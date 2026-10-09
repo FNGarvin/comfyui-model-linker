@@ -20,7 +20,7 @@ except ImportError:
 
 
 # Common model file extensions
-MODEL_EXTENSIONS = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft', '.onnx'}
+MODEL_EXTENSIONS = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft', '.onnx', '.gguf'}
 
 # Mapping of common node types to their expected model category
 # This is used as hints but we don't rely solely on this
