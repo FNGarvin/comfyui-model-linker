@@ -338,7 +338,11 @@ def apply_resolution(
             'category': resolution.get('category'),
             'resolved_model': resolution.get('resolved_model'),
             'subgraph_id': resolution.get('subgraph_id'),  # Include subgraph_id for subgraph nodes
-            'is_top_level': resolution.get('is_top_level')  # True for top-level nodes, False for nodes in subgraph definitions
+            'is_top_level': resolution.get('is_top_level'),  # True for top-level nodes, False for nodes in subgraph definitions
+            # Filename nested in a dict/list widget (rgthree, LoraManager)
+            'nested_key': resolution.get('nested_key'),
+            'list_index': resolution.get('list_index'),
+            'text_widget_index': resolution.get('text_widget_index')
         }
         
         # If resolved_model provided, extract path if needed

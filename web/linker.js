@@ -1139,6 +1139,22 @@ class LinkerManagerDialog extends ComfyDialog {
         });
     }
 
+    /**
+     * Strength / on-off chips for LoRA slots in multi-LoRA loaders
+     * (rgthree Power Lora Loader, LoraManager).
+     */
+    renderSlotChips(ref) {
+        let html = '';
+        const strength = Number(ref.strength);
+        if (ref.strength !== undefined && ref.strength !== null && Number.isFinite(strength)) {
+            html += `<span class="ml-category-chip" title="LoRA strength">${strength.toFixed(2)}</span>`;
+        }
+        if (ref.active === false) {
+            html += `<span class="ml-category-chip" title="This LoRA slot is switched off in the node">off</span>`;
+        }
+        return html;
+    }
+
     renderAllModelRow(entry, index) {
         const formatted = this.formatFilename(entry.original_path || '', 50);
         const refs = entry.all_node_refs || [entry];
@@ -1150,6 +1166,7 @@ class LinkerManagerDialog extends ComfyDialog {
         if (entry.__missing) {
             html += `<span class="ml-missing-badge">missing</span>`;
         }
+        html += this.renderSlotChips(entry);
         html += `<span class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" data-jump-index="${index}" title="${nodeLabel} #${entry.node_id}${refs.length > 1 ? ` - ${refs.length} nodes use this model, click again for the next one` : ''}">${LOCATE_ICON}${jumpLabel}</span>`;
         if (entry.__missing) {
             html += `<button class="ml-btn ml-btn-secondary ml-btn-sm" data-fix-missing="1" title="Resolve it in the Missing tab">Fix</button>`;
@@ -1259,15 +1276,7 @@ class LinkerManagerDialog extends ComfyDialog {
             }
 
             const refs = entry.all_node_refs || [entry];
-            const resolutions = refs.map(ref => ({
-                node_id: ref.node_id,
-                widget_index: ref.widget_index,
-                resolved_path: file.path,
-                category: ref.category,
-                resolved_model: file,
-                subgraph_id: ref.subgraph_id,
-                is_top_level: ref.is_top_level
-            }));
+            const resolutions = refs.map(ref => this.buildResolution(ref, file));
 
             const response = await api.fetchApi('/model_linker/resolve', {
                 method: 'POST',
@@ -1372,9 +1381,9 @@ class LinkerManagerDialog extends ComfyDialog {
             if (!missing) continue;
             
             // Find the new progress div by ID
-            const progressId = `download-progress-${missing.node_id}-${missing.widget_index}`;
+            const progressId = `download-progress-${this.slotKey(missing)}`;
             const newProgressDiv = this.contentElement.querySelector(`#${progressId}`);
-            const newDownloadBtn = this.contentElement.querySelector(`#download-${missing.node_id}-${missing.widget_index}`);
+            const newDownloadBtn = this.contentElement.querySelector(`#download-${this.slotKey(missing)}`);
             
             if (newProgressDiv) {
                 // Update the reference
@@ -1432,7 +1441,7 @@ class LinkerManagerDialog extends ComfyDialog {
             const downloading = info.missing;
             if (!downloading) continue;
             const alreadyListed = displayModels.some(m =>
-                m.node_id === downloading.node_id && m.widget_index === downloading.widget_index);
+                this.slotKey(m) === this.slotKey(downloading));
             if (!alreadyListed) {
                 displayModels.push(downloading);
             }
@@ -1532,7 +1541,7 @@ class LinkerManagerDialog extends ComfyDialog {
             
             sortedMatches.forEach((match, matchIndex) => {
                 // Attach listener to all matches (all now have resolve buttons)
-                const buttonId = `resolve-${missing.node_id}-${missing.widget_index}-${matchIndex}`;
+                const buttonId = `resolve-${this.slotKey(missing)}-${matchIndex}`;
                 const resolveButton = container.querySelector(`#${buttonId}`);
                 if (resolveButton) {
                     resolveButton.addEventListener('click', () => {
@@ -1542,7 +1551,7 @@ class LinkerManagerDialog extends ComfyDialog {
             });
             
             // Attach download button listener
-            const downloadBtnId = `download-${missing.node_id}-${missing.widget_index}`;
+            const downloadBtnId = `download-${this.slotKey(missing)}`;
             const downloadBtn = container.querySelector(`#${downloadBtnId}`);
             if (downloadBtn && missing.download_source) {
                 downloadBtn.addEventListener('click', () => {
@@ -1551,7 +1560,7 @@ class LinkerManagerDialog extends ComfyDialog {
             }
             
             // Attach search button listener
-            const searchBtnId = `search-${missing.node_id}-${missing.widget_index}`;
+            const searchBtnId = `search-${this.slotKey(missing)}`;
             const searchBtn = container.querySelector(`#${searchBtnId}`);
             if (searchBtn) {
                 searchBtn.addEventListener('click', () => {
@@ -1560,7 +1569,7 @@ class LinkerManagerDialog extends ComfyDialog {
             }
 
             // Attach jump-to-node listener on the node chip
-            const jumpChip = container.querySelector(`#jump-${missing.node_id}-${missing.widget_index}`);
+            const jumpChip = container.querySelector(`#jump-${this.slotKey(missing)}`);
             if (jumpChip) {
                 jumpChip.addEventListener('click', () => {
                     this.jumpToNode(missing);
@@ -1609,12 +1618,13 @@ class LinkerManagerDialog extends ComfyDialog {
         if (missing.category) {
             html += `<span class="ml-category-chip">${missing.category}</span>`;
         }
+        html += this.renderSlotChips(missing);
         const refCount = (missing.all_node_refs || [missing]).length;
         const jumpLabel = refCount > 1 ? `Locate node (${refCount})` : 'Locate node';
         const jumpTitle = refCount > 1
             ? `${nodeLabel} #${missing.node_id} - ${refCount} nodes use this model, click again for the next one`
             : `${nodeLabel} #${missing.node_id}`;
-        html += `<span id="jump-${missing.node_id}-${missing.widget_index}" class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" title="${jumpTitle}">${LOCATE_ICON}${jumpLabel}</span>`;
+        html += `<span id="jump-${this.slotKey(missing)}" class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" title="${jumpTitle}">${LOCATE_ICON}${jumpLabel}</span>`;
         html += `</div>`;
         html += `</div>`;
         
@@ -1640,7 +1650,7 @@ class LinkerManagerDialog extends ComfyDialog {
             
             for (let matchIndex = 0; matchIndex < sortedMatches.length; matchIndex++) {
                 const match = sortedMatches[matchIndex];
-                const buttonId = `resolve-${missing.node_id}-${missing.widget_index}-${matchIndex}`;
+                const buttonId = `resolve-${this.slotKey(missing)}-${matchIndex}`;
                 const matchPath = match.model?.relative_path || match.filename || '';
                 const isBestMatch = matchIndex === 0 && match.confidence >= 95;
                 
@@ -1705,7 +1715,7 @@ class LinkerManagerDialog extends ComfyDialog {
             }
             
             html += `<div class="ml-download-section">`;
-            html += `<button id="download-${missing.node_id}-${missing.widget_index}" class="ml-btn ml-btn-download">`;
+            html += `<button id="download-${this.slotKey(missing)}" class="ml-btn ml-btn-download">`;
             html += `<span class="ml-btn-icon">☁</span> Download${sizeDisplay ? ` (${sizeDisplay})` : ''}`;
             html += `</button>`;
             html += `<div class="ml-download-info">`;
@@ -1721,16 +1731,16 @@ class LinkerManagerDialog extends ComfyDialog {
         } else {
             // No known download - offer search
             html += `<div class="ml-download-section">`;
-            html += `<button id="search-${missing.node_id}-${missing.widget_index}" class="ml-btn ml-btn-link">`;
+            html += `<button id="search-${this.slotKey(missing)}" class="ml-btn ml-btn-link">`;
             html += `<span class="ml-btn-icon">🔍</span> Search Online`;
             html += `</button>`;
             html += `<div class="ml-download-info">Search HuggingFace & CivitAI</div>`;
             html += `</div>`;
-            html += `<div id="search-results-${missing.node_id}-${missing.widget_index}" style="margin-top: 8px; display: none;"></div>`;
+            html += `<div id="search-results-${this.slotKey(missing)}" style="margin-top: 8px; display: none;"></div>`;
         }
         
         // Progress container (for downloads)
-        html += `<div id="download-progress-${missing.node_id}-${missing.widget_index}" style="margin-top: 8px; display: none;"></div>`;
+        html += `<div id="download-progress-${this.slotKey(missing)}" style="margin-top: 8px; display: none;"></div>`;
         
         html += `</div>`; // End right column
         html += `</div>`; // End columns
@@ -1887,15 +1897,7 @@ class LinkerManagerDialog extends ComfyDialog {
 
             // Resolve ALL nodes that need this model (all_node_refs contains deduplicated refs)
             const nodeRefs = missing.all_node_refs || [missing];
-            const resolutions = nodeRefs.map(ref => ({
-                node_id: ref.node_id,
-                widget_index: ref.widget_index,
-                resolved_path: resolvedModel.path,
-                category: ref.category,
-                resolved_model: resolvedModel,
-                subgraph_id: ref.subgraph_id,
-                is_top_level: ref.is_top_level
-            }));
+            const resolutions = nodeRefs.map(ref => this.buildResolution(ref, resolvedModel));
 
             const response = await api.fetchApi('/model_linker/resolve', {
                 method: 'POST',
@@ -1973,15 +1975,7 @@ class LinkerManagerDialog extends ComfyDialog {
                     modelCount++;
                     const nodeRefs = missing.all_node_refs || [missing];
                     for (const ref of nodeRefs) {
-                        resolutions.push({
-                            node_id: ref.node_id,
-                            widget_index: ref.widget_index,
-                            resolved_path: perfectMatch.model.path,
-                            category: ref.category,
-                            resolved_model: perfectMatch.model,
-                            subgraph_id: ref.subgraph_id,  // Include subgraph_id for subgraph nodes
-                            is_top_level: ref.is_top_level  // True for top-level nodes, False for nodes in subgraph definitions
-                        });
+                        resolutions.push(this.buildResolution(ref, perfectMatch.model));
                     }
                 }
             }
@@ -2159,15 +2153,7 @@ class LinkerManagerDialog extends ComfyDialog {
                 // Auto-resolve ALL nodes that need this model
                 // all_node_refs contains all nodes referencing this model (deduplicated)
                 const nodeRefs = targetMissing.all_node_refs || [targetMissing];
-                const resolutions = nodeRefs.map(ref => ({
-                    node_id: ref.node_id,
-                    widget_index: ref.widget_index,
-                    resolved_path: perfectMatch.model.path,
-                    category: ref.category,
-                    resolved_model: perfectMatch.model,
-                    subgraph_id: ref.subgraph_id,
-                    is_top_level: ref.is_top_level
-                }));
+                const resolutions = nodeRefs.map(ref => this.buildResolution(ref, perfectMatch.model));
 
                 const resolveResponse = await api.fetchApi('/model_linker/resolve', {
                     method: 'POST',
@@ -2214,9 +2200,9 @@ class LinkerManagerDialog extends ComfyDialog {
         const originalFilename = missing.original_path?.split('/').pop()?.split('\\').pop() || 'model.safetensors';
         const filename = source.filename || originalFilename;
         const category = source.directory || missing.category || 'checkpoints';
-        const progressId = `download-progress-${missing.node_id}-${missing.widget_index}`;
+        const progressId = `download-progress-${this.slotKey(missing)}`;
         const progressDiv = this.contentElement?.querySelector(`#${progressId}`);
-        const downloadBtn = this.contentElement?.querySelector(`#download-${missing.node_id}-${missing.widget_index}`);
+        const downloadBtn = this.contentElement?.querySelector(`#download-${this.slotKey(missing)}`);
 
         try {
             // Disable button and show progress with cancel button immediately
@@ -2441,9 +2427,9 @@ class LinkerManagerDialog extends ComfyDialog {
     async searchOnline(missing) {
         const filename = missing.original_path?.split('/').pop()?.split('\\').pop() || '';
         const category = missing.category || '';
-        const resultsId = `search-results-${missing.node_id}-${missing.widget_index}`;
+        const resultsId = `search-results-${this.slotKey(missing)}`;
         const resultsDiv = this.contentElement?.querySelector(`#${resultsId}`);
-        const searchBtn = this.contentElement?.querySelector(`#search-${missing.node_id}-${missing.widget_index}`);
+        const searchBtn = this.contentElement?.querySelector(`#search-${this.slotKey(missing)}`);
 
         try {
             if (searchBtn) {
@@ -2585,7 +2571,7 @@ class LinkerManagerDialog extends ComfyDialog {
      * Download from search results
      */
     async downloadFromSearch(missing, url, filename, category, btn) {
-        const progressId = `download-progress-${missing.node_id}-${missing.widget_index}`;
+        const progressId = `download-progress-${this.slotKey(missing)}`;
         const progressDiv = this.contentElement?.querySelector(`#${progressId}`);
 
         try {
@@ -2712,7 +2698,14 @@ class LinkerManagerDialog extends ComfyDialog {
         }
 
         if (Array.isArray(resolutions) && resolutions.length > 0) {
-            const failed = resolutions.filter(res => !this.applyWidgetUpdate(workflow, res));
+            // One undo step for the whole batch
+            app.graph.beforeChange?.();
+            let failed;
+            try {
+                failed = resolutions.filter(res => !this.applyWidgetUpdate(workflow, res));
+            } finally {
+                app.graph.afterChange?.();
+            }
             if (failed.length === 0) {
                 app.graph.setDirtyCanvas?.(true, true);
                 return;
@@ -2744,44 +2737,86 @@ class LinkerManagerDialog extends ComfyDialog {
     }
 
     /**
+     * Unique DOM-safe key of one model slot. Several LoRAs can live on one
+     * node (rgthree Power Lora Loader, LoraManager), so node id + widget
+     * index alone is not enough; the backend sends ref_key for this.
+     */
+    slotKey(ref) {
+        const key = ref.ref_key || `${ref.node_id}-${ref.widget_index}`;
+        return String(key).replace(/[^A-Za-z0-9_-]/g, '_');
+    }
+
+    /**
+     * Resolution payload for /model_linker/resolve that points one model
+     * slot at a local file.
+     */
+    buildResolution(ref, model) {
+        return {
+            node_id: ref.node_id,
+            widget_index: ref.widget_index,
+            resolved_path: model.path,
+            category: ref.category,
+            resolved_model: model,
+            subgraph_id: ref.subgraph_id,  // Include subgraph_id for subgraph nodes
+            is_top_level: ref.is_top_level,  // True for top-level nodes, False for nodes in subgraph definitions
+            // Filename nested inside a dict/list widget value (rgthree, LoraManager)
+            nested_key: ref.nested_key,
+            list_index: ref.list_index,
+            text_widget_index: ref.text_widget_index
+        };
+    }
+
+    /**
      * Apply a single resolution to the live graph without rebuilding it.
      * Returns true if a live widget was updated.
      */
     applyWidgetUpdate(workflow, res) {
-        const widgetIndex = res.widget_index;
-
         // The backend wrote ComfyUI's native relative path into the returned
         // workflow JSON - read it back so the live widget gets the exact
         // value validation expects (resolved_path is the absolute path).
-        const value = this.getWidgetValueFromWorkflow(workflow, res);
-        if (value === undefined) {
+        const values = this.getWidgetValuesFromWorkflow(workflow, res);
+        if (!values || res.widget_index >= values.length) {
             return false;
+        }
+
+        // LoraManager also mirrors the LoRA list as "<lora:name:...>" text
+        const indices = [res.widget_index];
+        if (Number.isInteger(res.text_widget_index) && res.text_widget_index < values.length) {
+            indices.push(res.text_widget_index);
         }
 
         let updated = false;
         for (const node of this.findLiveNodes(res)) {
-            if (node.widgets && node.widgets[widgetIndex]) {
-                const widget = node.widgets[widgetIndex];
-                widget.value = value;
-                widget.callback?.(value, app.canvas, node, null, null);
-                updated = true;
-            } else if (Array.isArray(node.widgets_values) && widgetIndex < node.widgets_values.length) {
-                node.widgets_values[widgetIndex] = value;
-                updated = true;
+            let nodeUpdated = false;
+            for (const index of indices) {
+                // Dict/list values (rgthree slots, LoraManager lists) get a
+                // fresh copy so the widget sees a changed value
+                const raw = values[index];
+                const value = raw !== null && typeof raw === 'object' ? structuredClone(raw) : raw;
+                if (node.widgets && node.widgets[index]) {
+                    const widget = node.widgets[index];
+                    widget.value = value;
+                    widget.callback?.(value, app.canvas, node, null, null);
+                    nodeUpdated = true;
+                } else if (Array.isArray(node.widgets_values) && index < node.widgets_values.length) {
+                    node.widgets_values[index] = value;
+                    nodeUpdated = true;
+                }
             }
-            if (updated) {
+            if (nodeUpdated) {
                 node.setDirtyCanvas?.(true, true);
+                updated = true;
             }
         }
         return updated;
     }
 
     /**
-     * Read the updated widget value for a resolution back out of the
-     * workflow JSON returned by the resolve API (mirrors the node search in
-     * core/workflow_updater.update_model_path).
+     * Read the updated widget values for a resolution's node back out of
+     * the workflow JSON returned by the resolve API (mirrors the node search
+     * in core/workflow_updater.update_model_path).
      */
-    getWidgetValueFromWorkflow(workflow, res) {
+    getWidgetValuesFromWorkflow(workflow, res) {
         let nodes;
         if (res.is_top_level === false && res.subgraph_id) {
             const subgraphs = workflow?.definitions?.subgraphs || [];
@@ -2790,11 +2825,7 @@ class LinkerManagerDialog extends ComfyDialog {
             nodes = workflow?.nodes || [];
         }
         const node = nodes.find(n => n.id === res.node_id);
-        const values = node?.widgets_values;
-        if (!Array.isArray(values) || res.widget_index >= values.length) {
-            return undefined;
-        }
-        return values[res.widget_index];
+        return Array.isArray(node?.widgets_values) ? node.widgets_values : null;
     }
 
     /**

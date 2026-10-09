@@ -44,6 +44,25 @@ NODE_TYPE_TO_CATEGORY_HINTS = {
 }
 
 
+# Keys holding a model filename inside dict widget values, e.g. rgthree's
+# Power Lora Loader stores each slot as {"on": true, "lora": "x.safetensors",
+# "strength": 1.0}
+NESTED_MODEL_KEYS = {
+    'lora': 'loras',
+    'lora_name': 'loras',
+    'ckpt_name': 'checkpoints',
+    'unet_name': 'diffusion_models',
+    'vae_name': 'vae',
+    'clip_name': 'text_encoders',
+}
+
+# LoraManager loaders keep a list of {"name": <file stem>, "strength", "active"}
+# in widgets_values[2] and mirror it as "<lora:name:strength>" text in [1]
+LORA_MANAGER_NODE_TYPES = {'LoraLoaderV2', 'Lora Loader (LoraManager)', 'Lora Stacker (LoraManager)'}
+LORA_MANAGER_LIST_INDEX = 2
+LORA_MANAGER_TEXT_INDEX = 1
+
+
 def is_model_filename(value: Any) -> bool:
     """
     Check if a value looks like a model filename.
@@ -382,41 +401,134 @@ def get_node_model_info(node: Dict[str, Any]) -> List[Dict[str, Any]]:
     if field_info and len(widgets_values) == field_info['widget_count']:
         by_widget_index = field_info['by_widget_index']
 
+    if node_type in LORA_MANAGER_NODE_TYPES:
+        model_refs.extend(_lora_manager_refs(node_id, node_type, widgets_values))
+
     # For each widget value, check if it looks like a model file
     for idx, value in enumerate(widgets_values):
+        if isinstance(value, dict):
+            # rgthree Power Lora Loader & co. keep the filename inside a dict
+            for key, category in NESTED_MODEL_KEYS.items():
+                nested_value = value.get(key)
+                if not is_model_filename(nested_value):
+                    continue
+                ref = _build_model_ref(node_id, node_type, idx, nested_value, [category])
+                ref['nested_key'] = key
+                if 'strength' in value:
+                    ref['strength'] = value.get('strength')
+                if 'on' in value:
+                    ref['active'] = bool(value.get('on'))
+                model_refs.append(ref)
+            continue
+
         if not is_model_filename(value):
             continue
 
         expected_categories = node_categories
         if by_widget_index and idx in by_widget_index:
             expected_categories = by_widget_index[idx]
-        categories_to_try = expected_categories  # None -> try all categories
-
-        # Try to resolve the model path
-        resolved = try_resolve_model_path(value, categories_to_try)
-
-        if resolved:
-            category, full_path = resolved
-            exists = os.path.exists(full_path)
-        else:
-            # If we can't resolve it, check if it at least looks like a model filename
-            # This might be a missing model or a custom node's model
-            category = (expected_categories[0] if expected_categories else None) or 'unknown'
-            full_path = None
-            exists = False
-
-        model_refs.append({
-            'node_id': node_id,
-            'node_type': node_type,
-            'widget_index': idx,
-            'original_path': value,
-            'category': category,
-            'expected_categories': expected_categories,
-            'full_path': full_path,
-            'exists': exists
-        })
+        model_refs.append(_build_model_ref(node_id, node_type, idx, value, expected_categories))
 
     return model_refs
+
+
+def _get_folder_paths():
+    """folder_paths, imported on first use (it may not exist at import time)."""
+    global folder_paths
+    if folder_paths is None:
+        try:
+            import folder_paths as fp
+            folder_paths = fp
+        except ImportError:
+            return None
+    return folder_paths
+
+
+def _build_model_ref(node_id, node_type, widget_index: int, value: str,
+                     expected_categories: Optional[List[str]]) -> Dict[str, Any]:
+    """Resolve one model filename found in a node and describe it."""
+    resolved = try_resolve_model_path(value, expected_categories)  # None -> try all categories
+
+    if resolved:
+        category, full_path = resolved
+        exists = os.path.exists(full_path)
+    else:
+        # Unresolvable - a missing model (or a custom node's model)
+        category = (expected_categories[0] if expected_categories else None) or 'unknown'
+        full_path = None
+        exists = False
+
+    return {
+        'node_id': node_id,
+        'node_type': node_type,
+        'widget_index': widget_index,
+        'original_path': value,
+        'category': category,
+        'expected_categories': expected_categories,
+        'full_path': full_path,
+        'exists': exists
+    }
+
+
+def _lora_manager_refs(node_id, node_type, widgets_values: list) -> List[Dict[str, Any]]:
+    """
+    Model refs for a LoraManager loader. Its entries store the file stem
+    without extension or folder ({"name": "my_lora", ...}), so match the
+    stem against the loras folder.
+    """
+    if len(widgets_values) <= LORA_MANAGER_LIST_INDEX:
+        return []
+    entries = widgets_values[LORA_MANAGER_LIST_INDEX]
+    if not isinstance(entries, list):
+        return []
+
+    lora_files = []
+    fp = _get_folder_paths()
+    if fp is not None:
+        try:
+            lora_files = fp.get_filename_list('loras')
+        except Exception:
+            lora_files = []
+    by_stem: Dict[str, str] = {}
+    for filename in lora_files:
+        stem = os.path.splitext(filename.replace('\\', '/').rsplit('/', 1)[-1])[0]
+        by_stem.setdefault(stem, filename)
+        by_stem.setdefault(stem.lower(), filename)
+
+    refs = []
+    for list_index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get('name')
+        if not isinstance(name, str) or not name.strip():
+            continue
+        filename = by_stem.get(name) or by_stem.get(name.lower())
+        if filename:
+            ref = _build_model_ref(node_id, node_type, LORA_MANAGER_LIST_INDEX, filename, ['loras'])
+        else:
+            missing_name = name if is_model_filename(name) else f'{name}.safetensors'
+            ref = _build_model_ref(node_id, node_type, LORA_MANAGER_LIST_INDEX, missing_name, ['loras'])
+        ref.update({
+            'list_index': list_index,
+            'nested_key': 'name',
+            'text_widget_index': LORA_MANAGER_TEXT_INDEX,
+            'strength': entry.get('strength'),
+            'active': bool(entry.get('active', True)),
+        })
+        refs.append(ref)
+    return refs
+
+
+def make_ref_key(ref: Dict[str, Any]) -> str:
+    """Unique id of one model slot: several LoRAs can share a node and widget."""
+    parts = [str(ref.get('node_id')), str(ref.get('widget_index'))]
+    if ref.get('list_index') is not None:
+        parts.append(str(ref['list_index']))
+    if ref.get('nested_key'):
+        parts.append(str(ref['nested_key']))
+    if ref.get('is_top_level') is False and ref.get('subgraph_id'):
+        parts.insert(0, str(ref['subgraph_id']))
+    return '-'.join(parts)
 
 
 def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -459,6 +571,7 @@ def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any
                 ref['subgraph_name'] = subgraph_name
                 ref['subgraph_path'] = None  # Top-level, not in definitions.subgraphs
                 ref['is_top_level'] = True  # Flag to indicate this is a top-level node
+                ref['ref_key'] = make_ref_key(ref)
             all_model_refs.extend(model_refs)
         except Exception as e:
             logging.warning(f"Error analyzing node {node.get('id', 'unknown')}: {e}")
@@ -484,6 +597,7 @@ def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any
                     ref['subgraph_name'] = subgraph_name
                     ref['subgraph_path'] = ['definitions', 'subgraphs', subgraph_id, 'nodes']
                     ref['is_top_level'] = False  # This is inside a subgraph definition
+                    ref['ref_key'] = make_ref_key(ref)
                 all_model_refs.extend(model_refs)
             except Exception as e:
                 logging.warning(f"Error analyzing subgraph node {node.get('id', 'unknown')}: {e}")

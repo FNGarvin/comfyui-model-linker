@@ -121,6 +121,7 @@ nodes_mod.NODE_CLASS_MAPPINGS = {
 sys.modules['nodes'] = nodes_mod
 
 from core.workflow_analyzer import (  # noqa: E402
+    analyze_workflow_models,
     get_node_model_categories,
     get_node_model_info,
     group_models_by_file,
@@ -167,6 +168,46 @@ def test_tracing_falls_back_to_node_wide_categories():
 def test_tracing_does_not_leak_into_other_threads():
     assert get_node_model_categories('FakeThreadedLoader') == ['checkpoints']
     assert FakeThreadedLoader.seen_from_other_thread == ['mylora.safetensors']
+
+
+def test_rgthree_power_lora_slots_detected():
+    node = {'id': 30, 'type': 'Power Lora Loader (rgthree)', 'widgets_values': [
+        {}, {'type': 'PowerLoraLoaderHeaderWidget'},
+        {'on': True, 'lora': 'mylora.safetensors', 'strength': 0.8},
+        {'on': False, 'lora': 'gone.safetensors', 'strength': 1.0},
+        {}, '',
+    ]}
+    refs = get_node_model_info(node)
+    assert [r['widget_index'] for r in refs] == [2, 3]
+    assert refs[0]['exists'] is True and refs[0]['category'] == 'loras'
+    assert refs[0]['nested_key'] == 'lora' and refs[0]['strength'] == 0.8 and refs[0]['active'] is True
+    assert refs[1]['exists'] is False and refs[1]['active'] is False
+    assert refs[1]['expected_categories'] == ['loras']
+
+
+def test_lora_manager_entries_detected():
+    node = {'id': 31, 'type': 'Lora Loader (LoraManager)', 'widgets_values': [
+        '', '<lora:mylora:1.0> <lora:gone:0.5>',
+        [{'name': 'mylora', 'strength': 1.0, 'active': True},
+         {'name': 'gone', 'strength': 0.5, 'active': False}],
+    ]}
+    refs = get_node_model_info(node)
+    assert len(refs) == 2
+    assert refs[0]['original_path'] == 'mylora.safetensors' and refs[0]['exists'] is True
+    assert refs[0]['list_index'] == 0 and refs[0]['text_widget_index'] == 1
+    assert refs[1]['original_path'] == 'gone.safetensors' and refs[1]['exists'] is False
+    assert refs[1]['active'] is False
+
+
+def test_ref_keys_are_unique_per_slot():
+    workflow = {'nodes': [
+        {'id': 30, 'type': 'Power Lora Loader (rgthree)', 'widgets_values': [
+            {'on': True, 'lora': 'a.safetensors'}, {'on': True, 'lora': 'b.safetensors'}]},
+        {'id': 31, 'type': 'Lora Loader (LoraManager)', 'widgets_values': [
+            '', '', [{'name': 'x'}, {'name': 'y'}]]},
+    ]}
+    keys = [r['ref_key'] for r in analyze_workflow_models(workflow)]
+    assert len(keys) == 4 and len(set(keys)) == 4
 
 
 def test_introspection_non_model_node():

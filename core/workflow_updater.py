@@ -116,7 +116,10 @@ def update_model_path(
     base_directory: str = None,
     resolved_model: Dict[str, Any] = None,
     subgraph_id: str = None,
-    is_top_level: bool = None
+    is_top_level: bool = None,
+    nested_key: str = None,
+    list_index: int = None,
+    text_widget_index: int = None
 ) -> bool:
     """
     Update a single model path in a workflow node, supporting both top-level and subgraph nodes.
@@ -132,6 +135,10 @@ def update_model_path(
         subgraph_id: ID of the subgraph (UUID for subgraph type, or None)
         is_top_level: True if this is a top-level node (even if it's a subgraph instance), 
                      False if it's inside a subgraph definition, None to auto-detect
+        nested_key: Key holding the filename when the widget value is a dict
+                    (rgthree Power Lora Loader) or a list of dicts (LoraManager)
+        list_index: Entry index when the widget value is a list (LoraManager)
+        text_widget_index: Widget holding "<lora:name:...>" text to keep in sync
         
     Returns:
         True if update was successful, False otherwise
@@ -217,10 +224,43 @@ def update_model_path(
         relative_path = resolved_path
     
     # Update the widget value
-    widgets_values[widget_index] = relative_path
+    current = widgets_values[widget_index]
+    if list_index is not None:
+        if not isinstance(current, list) or list_index >= len(current) or not isinstance(current[list_index], dict):
+            logging.warning(f"List entry {list_index} not found in node {node_id}, widget {widget_index}")
+            return False
+        _update_lora_manager_entry(widgets_values, current[list_index], nested_key or 'name',
+                                   relative_path, text_widget_index)
+    elif nested_key and isinstance(current, dict):
+        current[nested_key] = relative_path
+    else:
+        widgets_values[widget_index] = relative_path
     
     logging.debug(f"Updated node {node_id}, widget {widget_index} to: {relative_path}")
     return True
+
+
+def _update_lora_manager_entry(
+    widgets_values: List[Any],
+    entry: Dict[str, Any],
+    key: str,
+    relative_path: str,
+    text_widget_index: Optional[int]
+) -> None:
+    """
+    LoraManager stores the bare file stem and mirrors it as
+    "<lora:stem:strength>" text in another widget - update both.
+    """
+    filename = relative_path.replace('\\', '/').rsplit('/', 1)[-1]
+    new_name = os.path.splitext(filename)[0]
+    old_name = entry.get(key)
+    entry[key] = new_name
+
+    if (old_name and text_widget_index is not None
+            and 0 <= text_widget_index < len(widgets_values)
+            and isinstance(widgets_values[text_widget_index], str)):
+        widgets_values[text_widget_index] = widgets_values[text_widget_index].replace(
+            f'<lora:{old_name}:', f'<lora:{new_name}:')
 
 
 def update_workflow_nodes(
@@ -277,7 +317,10 @@ def update_workflow_nodes(
             base_directory,
             resolved_model,
             subgraph_id,
-            is_top_level
+            is_top_level,
+            mapping.get('nested_key'),
+            mapping.get('list_index'),
+            mapping.get('text_widget_index')
         )
         
         if success:
