@@ -11,11 +11,31 @@ import logging
 # Web directory for JavaScript interface
 WEB_DIRECTORY = "./web"
 
-# Empty NODE_CLASS_MAPPINGS - we don't provide custom nodes, only web extension
-# This prevents ComfyUI from showing "IMPORT FAILED" message
-NODE_CLASS_MAPPINGS = {}
+class ModelLinkerNode:
+    """
+    Model Linker node, added to a workflow by the Export tab. It has buttons
+    to open Model Linker (added by web/linker.js) and identifies this pack
+    to ComfyUI-Manager for whoever opens the shared workflow. It has no
+    inputs or outputs, so it never runs as part of a prompt.
+    """
 
-__all__ = ["WEB_DIRECTORY"]
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "noop"
+    CATEGORY = "utils"
+    DESCRIPTION = "Opens Model Linker. Added by Model Linker's Export so others can find and download this workflow's models."
+
+    def noop(self):
+        return ()
+
+
+NODE_CLASS_MAPPINGS = {"ModelLinker": ModelLinkerNode}
+NODE_DISPLAY_NAME_MAPPINGS = {"ModelLinker": "Model Linker"}
+
+__all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 
 class ModelLinkerExtension:
@@ -232,6 +252,60 @@ class ModelLinkerExtension:
                 provider = request.match_info['provider']
                 result = await asyncio.to_thread(check_token, provider)
                 return web.json_response(result)
+
+            # ==================== EXPORT ROUTES ====================
+
+            if download_available:
+                from .core import exporter
+
+                @routes.post("/model_linker/export/lookup")
+                async def export_lookup(request):
+                    """Public download link for each model: {models: [{filename, category, existing_url?, sha256?}]}."""
+                    try:
+                        data = await request.json()
+                        models = data.get('models')
+                        if not isinstance(models, list):
+                            return web.json_response({'error': 'models list is required'}, status=400)
+                        links = await asyncio.to_thread(exporter.lookup_links, models, find_download_source)
+                        return web.json_response({'links': links})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export lookup error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
+
+                @routes.post("/model_linker/export/hash")
+                async def export_hash(request):
+                    """Hash a local model file and look it up: {full_path}."""
+                    try:
+                        data = await request.json()
+                        path = data.get('full_path', '')
+                        if not isinstance(path, str) or not exporter.is_inside_model_dirs(path):
+                            return web.json_response({'error': 'Not a file in a model folder'}, status=400)
+                        job_id = exporter.start_hash_job(path, find_by_hash)
+                        return web.json_response({'job_id': job_id})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export hash error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
+
+                @routes.get("/model_linker/export/hash/{job_id}")
+                async def export_hash_status(request):
+                    job = exporter.get_hash_job(request.match_info['job_id'])
+                    if not job:
+                        return web.json_response({'error': 'Unknown job'}, status=404)
+                    return web.json_response(job)
+
+                @routes.post("/model_linker/export/markdown")
+                async def export_markdown(request):
+                    """Model links note text: {models: [{name, url, directory}]}."""
+                    try:
+                        data = await request.json()
+                        models = data.get('models')
+                        if not isinstance(models, list):
+                            return web.json_response({'error': 'models list is required'}, status=400)
+                        models = [m for m in models if isinstance(m, dict)]
+                        return web.json_response({'markdown': exporter.build_model_links_markdown(models)})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export markdown error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
 
             # ==================== DOWNLOAD ROUTES ====================
             

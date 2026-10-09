@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 from .scanner import get_model_files
 from .workflow_analyzer import analyze_workflow_models, identify_missing_models, group_models_by_file
-from .matcher import find_matches
+from .matcher import find_matches, extract_filename
 from .workflow_updater import update_workflow_nodes
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,20 @@ def parse_huggingface_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def attach_workflow_urls(models: List[Dict[str, Any]], workflow_urls: Dict[str, Dict[str, Any]]) -> None:
+    """Copy URL / directory / SHA-256 found in the workflow onto each model entry."""
+    for model in models:
+        original_path = model.get('original_path', '')
+        url_info = workflow_urls.get(original_path) or workflow_urls.get(extract_filename(original_path))
+        if not url_info:
+            continue
+        model['workflow_url'] = url_info.get('url', '')
+        model['workflow_directory'] = url_info.get('directory', '')
+        model['url_source'] = url_info.get('source', '')
+        if url_info.get('sha256'):
+            model['workflow_sha256'] = url_info['sha256']
+
+
 def analyze_and_find_matches(
     workflow_json: Dict[str, Any],
     similarity_threshold: float = 0.0,
@@ -242,17 +256,7 @@ def analyze_and_find_matches(
     missing_models = identify_missing_models(all_model_refs, available_models)
     
     # Enrich missing models with workflow URLs
-    for missing in missing_models:
-        original_path = missing.get('original_path', '')
-        filename = os.path.basename(original_path)
-        
-        if filename in workflow_urls:
-            url_info = workflow_urls[filename]
-            missing['workflow_url'] = url_info.get('url', '')
-            missing['workflow_directory'] = url_info.get('directory', '')
-            missing['url_source'] = url_info.get('source', '')
-            if url_info.get('sha256'):
-                missing['workflow_sha256'] = url_info['sha256']
+    attach_workflow_urls(missing_models, workflow_urls)
     
     # Find matches for each missing model
     missing_with_matches = []
@@ -332,6 +336,8 @@ def analyze_and_find_matches(
     if include_resolved:
         # Grouped resolved references for the "All models" browse/swap view
         result['resolved_models'] = group_models_by_file(all_model_refs, exists_filter=True)
+        # Existing links let the Export tab reuse them
+        attach_workflow_urls(result['resolved_models'], workflow_urls)
 
     return result
 

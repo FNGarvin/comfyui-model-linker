@@ -215,6 +215,40 @@ class LinkerManagerDialog extends ComfyDialog {
             .ml-settings-section {
                 margin-bottom: 20px;
             }
+            .ml-export-row {
+                display: grid;
+                grid-template-columns: minmax(140px, 1fr) minmax(200px, 1.6fr) auto;
+                gap: 8px;
+                align-items: center;
+                padding: 6px 4px;
+                border-bottom: 1px solid var(--ml-border, #333);
+            }
+            .ml-export-name {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-size: 13px;
+                color: var(--ml-text, #ddd);
+            }
+            .ml-export-source {
+                display: block;
+                font-size: 11px;
+                color: var(--ml-text-muted, #999);
+                margin-top: 2px;
+            }
+            .ml-export-actions {
+                display: flex;
+                gap: 6px;
+                align-items: center;
+            }
+            .ml-export-options {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 16px;
+                margin: 16px 0 12px 0;
+                font-size: 13px;
+                color: var(--ml-text, #ddd);
+            }
             .ml-settings-section h3 {
                 margin: 0 0 6px 0;
                 font-size: 14px;
@@ -845,7 +879,12 @@ class LinkerManagerDialog extends ComfyDialog {
             textContent: "All models",
             onclick: () => this.switchTab('all')
         });
-        return $el("div.ml-tab-bar", {}, [this.missingTabBtn, this.allTabBtn]);
+        this.exportTabBtn = $el("button.ml-tab", {
+            textContent: "Export",
+            title: "Prepare this workflow for sharing: model links note + download links",
+            onclick: () => this.switchTab('export')
+        });
+        return $el("div.ml-tab-bar", {}, [this.missingTabBtn, this.allTabBtn, this.exportTabBtn]);
     }
 
     switchTab(tab) {
@@ -862,6 +901,7 @@ class LinkerManagerDialog extends ComfyDialog {
         this.allTabBtn.textContent = `All models (${missing + resolved})`;
         this.missingTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'missing' || !this.activeTab);
         this.allTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'all');
+        this.exportTabBtn?.classList.toggle('ml-tab-active', this.activeTab === 'export');
     }
 
     renderActiveTab() {
@@ -871,6 +911,8 @@ class LinkerManagerDialog extends ComfyDialog {
             this.renderAllModelsTab(this.contentElement);
         } else if (this.activeTab === 'settings') {
             this.renderSettingsTab(this.contentElement);
+        } else if (this.activeTab === 'export') {
+            this.renderExportTab(this.contentElement);
         } else {
             this.displayMissingModels(this.contentElement, this.analyzeData || {});
             this.reconnectActiveDownloads();
@@ -882,6 +924,8 @@ class LinkerManagerDialog extends ComfyDialog {
      * browser) and dialog behaviour.
      */
     async renderSettingsTab(container) {
+        if (this.autoResolveButton) this.autoResolveButton.style.display = 'none';
+        if (this.downloadAllButton) this.downloadAllButton.style.display = 'none';
         const providers = [
             { id: 'huggingface', key: 'hf_token', title: 'HuggingFace token',
               hint: 'Needed for gated or private models (e.g. FLUX.1-dev). Create a read token at huggingface.co/settings/tokens.' },
@@ -1012,6 +1056,305 @@ class LinkerManagerDialog extends ComfyDialog {
         }
     }
 
+    /**
+     * Export: gather a public download link for every model, then write a
+     * "Model links" note (official template layout), properties.models on
+     * the loader nodes, and a Model Linker node into the workflow.
+     */
+    renderExportTab(container) {
+        if (this.autoResolveButton) this.autoResolveButton.style.display = 'none';
+        if (this.downloadAllButton) this.downloadAllButton.style.display = 'none';
+
+        const data = this.analyzeData || {};
+        const entries = [
+            ...(data.missing_models || []),
+            ...(data.resolved_models || [])
+        ].sort((a, b) => (a.category || '').localeCompare(b.category || '')
+            || (a.original_path || '').localeCompare(b.original_path || ''));
+
+        if (entries.length === 0) {
+            container.innerHTML = this.renderStatusMessage('No model references found in the current workflow.', 'info');
+            return;
+        }
+
+        // Links found or typed this session, keyed by folder + model name
+        this.exportLinks = this.exportLinks || {};
+        const keyOf = (entry) => `${entry.category}|${entry.original_path}`;
+        const sourceLabels = {
+            workflow: 'from workflow', hf_index: 'HuggingFace', huggingface: 'HuggingFace',
+            civitai: 'CivitAI', model_list: 'ComfyUI-Manager list', popular: 'curated list',
+            civarchive: 'CivArchive', civitai_hash: 'CivitAI', manual: 'entered by you'
+        };
+        const describe = (link) => {
+            if (!link || !link.url) return '';
+            const label = sourceLabels[link.url_source] || sourceLabels[link.source] || link.source || '';
+            return `${label}${link.match_type === 'hash' ? ' · hash match' : ''}`;
+        };
+        const loadOption = (name) => {
+            try { return localStorage.getItem(`modelLinker.export.${name}`) !== 'false'; } catch { return true; }
+        };
+
+        let html = `<p class="ml-settings-hint">Links are looked up automatically. Paste one for any model that's missing a link (or leave it empty - it's listed as "no public link"). Applying writes into the open workflow; save it afterwards.</p>`;
+        entries.forEach((entry, index) => {
+            const formatted = this.formatFilename(entry.original_path || '', 60);
+            const link = this.exportLinks[keyOf(entry)];
+            html += `<div class="ml-export-row">`;
+            html += `<div style="min-width: 0;"><div class="ml-export-name" title="${formatted.full}">${formatted.display}</div>`;
+            html += `<span class="ml-export-source">${entry.category || 'unknown'}</span></div>`;
+            html += `<div style="min-width: 0;"><input class="ml-filter-input" data-export-url="${index}" type="url" placeholder="Looking up..." value="${link?.url ? link.url.replace(/"/g, '&quot;') : ''}">`;
+            html += `<span class="ml-export-source" data-export-source="${index}">${describe(link)}</span></div>`;
+            html += `<div class="ml-export-actions">`;
+            if (entry.full_path) {
+                html += `<button class="ml-btn ml-btn-secondary ml-btn-sm" data-export-hash="${index}" title="Hash the local file and look it up on HuggingFace, CivitAI and CivArchive">Find by hash</button>`;
+            }
+            html += `<button class="ml-btn ml-btn-secondary ml-btn-sm" data-export-open="${index}" title="Open link in a new tab">↗</button>`;
+            html += `</div></div>`;
+        });
+        html += `
+            <div class="ml-export-options">
+                <label><input type="checkbox" data-export-option="note" ${loadOption('note') ? 'checked' : ''}> Add "Model links" note</label>
+                <label><input type="checkbox" data-export-option="properties" ${loadOption('properties') ? 'checked' : ''}> Write links into loader nodes</label>
+                <label><input type="checkbox" data-export-option="node" ${loadOption('node') ? 'checked' : ''}> Add Model Linker node</label>
+            </div>
+            <button class="ml-btn ml-btn-primary" data-export-apply>Apply to workflow</button>`;
+        container.innerHTML = html;
+
+        const inputOf = (index) => container.querySelector(`[data-export-url="${index}"]`);
+        const sourceOf = (index) => container.querySelector(`[data-export-source="${index}"]`);
+        const setLink = (index, link) => {
+            this.exportLinks[keyOf(entries[index])] = link;
+            const input = inputOf(index);
+            if (input && link?.url) input.value = link.url;
+            if (sourceOf(index)) sourceOf(index).textContent = describe(link);
+        };
+
+        entries.forEach((entry, index) => {
+            inputOf(index)?.addEventListener('input', (e) => {
+                const url = e.target.value.trim();
+                this.exportLinks[keyOf(entry)] = url ? { url, source: 'manual', url_source: 'manual' } : null;
+                sourceOf(index).textContent = url ? describe(this.exportLinks[keyOf(entry)]) : '';
+            });
+        });
+
+        container.querySelectorAll('[data-export-open]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const url = inputOf(btn.dataset.exportOpen)?.value.trim();
+                if (/^https?:\/\//i.test(url || '')) window.open(url, '_blank', 'noopener');
+            });
+        });
+
+        container.querySelectorAll('[data-export-hash]').forEach(btn => {
+            btn.addEventListener('click', () => this.exportFindByHash(entries[btn.dataset.exportHash], btn,
+                (link) => setLink(btn.dataset.exportHash, link)));
+        });
+
+        container.querySelectorAll('[data-export-option]').forEach(box => {
+            box.addEventListener('change', () => {
+                try { localStorage.setItem(`modelLinker.export.${box.dataset.exportOption}`, box.checked ? 'true' : 'false'); } catch { }
+            });
+        });
+
+        container.querySelector('[data-export-apply]').addEventListener('click', async (e) => {
+            const options = {};
+            container.querySelectorAll('[data-export-option]').forEach(box => { options[box.dataset.exportOption] = box.checked; });
+            const models = entries.map((entry, index) => ({
+                entry,
+                name: entry.original_path,
+                directory: entry.category,
+                url: (inputOf(index)?.value || '').trim()
+            }));
+            e.target.disabled = true;
+            try {
+                await this.applyExport(models, options);
+            } finally {
+                e.target.disabled = false;
+            }
+        });
+
+        // Look up links for models that don't have one yet
+        const pending = entries
+            .map((entry, index) => ({ entry, index }))
+            .filter(({ entry }) => !(keyOf(entry) in this.exportLinks));
+        if (pending.length === 0) {
+            entries.forEach((_, index) => { if (inputOf(index)) inputOf(index).placeholder = 'Paste a download URL'; });
+            return;
+        }
+        api.fetchApi('/model_linker/export/lookup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                models: pending.map(({ entry }) => ({
+                    filename: entry.original_path,
+                    category: entry.category,
+                    existing_url: entry.workflow_url || '',
+                    sha256: entry.workflow_sha256 || ''
+                }))
+            })
+        }).then(r => r.json()).then(result => {
+            if (this.activeTab !== 'export' || !container.isConnected) return;
+            (result.links || []).forEach((link, i) => {
+                const { entry, index } = pending[i];
+                const input = inputOf(index);
+                if (input && input.value.trim()) return;  // the user typed one meanwhile
+                if (link) {
+                    setLink(index, link);
+                } else {
+                    this.exportLinks[keyOf(entry)] = null;
+                }
+            });
+        }).catch(error => {
+            console.error('Model Linker: link lookup failed:', error);
+        }).finally(() => {
+            entries.forEach((_, index) => { if (inputOf(index)) inputOf(index).placeholder = 'Paste a download URL'; });
+        });
+    }
+
+    /**
+     * Hash a local model file on the server and look the hash up.
+     */
+    async exportFindByHash(entry, button, onFound) {
+        const label = button.textContent;
+        button.disabled = true;
+        try {
+            const response = await api.fetchApi('/model_linker/export/hash', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ full_path: entry.full_path })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || `API error: ${response.status}`);
+
+            while (true) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                const job = await (await api.fetchApi(`/model_linker/export/hash/${data.job_id}`)).json();
+                if (job.status === 'hashing') {
+                    button.textContent = `Hashing ${Math.round((job.progress || 0) * 100)}%`;
+                } else if (job.status === 'looking_up') {
+                    button.textContent = 'Looking up...';
+                } else if (job.status === 'done') {
+                    if (job.result) {
+                        onFound(job.result);
+                        button.textContent = '✓ Found';
+                    } else {
+                        button.textContent = 'No match';
+                        button.title = `SHA-256 ${job.sha256} is not on HuggingFace, CivitAI or CivArchive`;
+                    }
+                    return;
+                } else {
+                    throw new Error(job.error || 'Hashing failed');
+                }
+            }
+        } catch (error) {
+            console.error('Model Linker: find by hash failed:', error);
+            this.showNotification('Find by hash failed: ' + error.message, 'error');
+            button.textContent = label;
+            button.disabled = false;
+        }
+    }
+
+    /**
+     * Write the export into the live graph as a single undo step.
+     */
+    async applyExport(models, options) {
+        if (!app?.graph) return;
+        const LG = window.LiteGraph;
+
+        let markdown = '';
+        if (options.note) {
+            try {
+                const response = await api.fetchApi('/model_linker/export/markdown', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ models: models.map(({ name, url, directory }) => ({ name, url, directory })) })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `API error: ${response.status}`);
+                markdown = data.markdown;
+            } catch (error) {
+                this.showNotification('Could not build the model links note: ' + error.message, 'error');
+                return;
+            }
+        }
+
+        const graph = app.graph;
+        const nodes = graph._nodes || graph.nodes || [];
+        const minX = nodes.length ? Math.min(...nodes.map(n => n.pos[0])) : 0;
+        const minY = nodes.length ? Math.min(...nodes.map(n => n.pos[1])) : 0;
+        const done = [];
+
+        graph.beforeChange?.();
+        try {
+            if (options.note && markdown) {
+                let note = nodes.find(n => n.properties?.model_linker_note);
+                if (!note) {
+                    note = LG?.createNode('MarkdownNote') || LG?.createNode('Note');
+                    if (note) {
+                        note.properties = { ...(note.properties || {}), model_linker_note: true };
+                        note.title = 'Model links';
+                        note.pos = [minX - 480, minY];
+                        note.size = [440, 560];
+                        graph.add(note);
+                    }
+                }
+                if (note) {
+                    if (note.widgets?.[0]) {
+                        note.widgets[0].value = markdown;
+                    }
+                    note.widgets_values = [markdown];
+                    done.push('note');
+                } else {
+                    console.warn('Model Linker: could not create a note node');
+                }
+            }
+
+            if (options.properties) {
+                let written = 0;
+                for (const { entry, name, directory, url } of models) {
+                    if (!url) continue;
+                    for (const ref of (entry.all_node_refs || [entry])) {
+                        for (const node of this.findLiveNodes(ref)) {
+                            node.properties = node.properties || {};
+                            const list = Array.isArray(node.properties.models) ? [...node.properties.models] : [];
+                            const item = { name, url, directory };
+                            const existing = list.findIndex(m => m?.name === name);
+                            if (existing >= 0) list[existing] = { ...list[existing], ...item };
+                            else list.push(item);
+                            node.properties.models = list;
+                            written++;
+                        }
+                    }
+                }
+                if (written) done.push('links');
+            }
+
+            if (options.node && !nodes.some(n => n.type === 'ModelLinker')) {
+                const linkerNode = LG?.createNode('ModelLinker');
+                if (linkerNode) {
+                    linkerNode.properties = {
+                        ...(linkerNode.properties || {}),
+                        aux_id: 'kianxyzw/comfyui-model-linker',
+                        'Node name for S&R': 'ModelLinker'
+                    };
+                    linkerNode.pos = [minX, minY - 140];
+                    graph.add(linkerNode);
+                    done.push('node');
+                } else {
+                    console.warn('Model Linker: ModelLinker node type is not registered - restart ComfyUI after updating');
+                }
+            }
+        } finally {
+            graph.afterChange?.();
+        }
+        graph.setDirtyCanvas?.(true, true);
+
+        if (done.length) {
+            const missingLinks = models.filter(m => !m.url).length;
+            this.showNotification(`✓ Ready to share - save the workflow.${missingLinks ? ` ${missingLinks} model${missingLinks > 1 ? 's have' : ' has'} no public link.` : ''}`, 'success');
+        } else {
+            this.showNotification('Nothing to apply', 'info');
+        }
+    }
+
     createContent() {
         this.contentElement = $el("div.ml-scrollable", {
             id: "model-linker-content",
@@ -1118,12 +1461,13 @@ class LinkerManagerDialog extends ComfyDialog {
         }
     }
     
-    async show(workflow = null) {
+    async show(workflow = null, tab = null) {
         this.backdrop.style.display = "block";
         this.element.style.display = "flex";
 
-        // Re-pick the default tab for each dialog session
-        this.activeTab = null;
+        // Re-pick the default tab for each dialog session unless one was asked for
+        this.activeTab = tab;
+        this.exportLinks = {};
 
         // Update button state in case there are active downloads
         this.updateDownloadAllButtonState();
@@ -3529,12 +3873,12 @@ class ModelLinker {
         document.body.appendChild(this.linkerButton);
     }
 
-    openLinkerManager() {
+    openLinkerManager(tab = null) {
         try {
             if (!this.dialog) {
                 this.dialog = new LinkerManagerDialog();
             }
-            this.dialog.show();
+            this.dialog.show(null, tab);
         } catch (error) {
             console.error("🔗 Model Linker: Error creating/showing dialog:", error);
             alert("Error opening Model Linker: " + error.message);
@@ -3547,6 +3891,15 @@ const modelLinker = new ModelLinker();
 // Register the extension
 app.registerExtension({
     name: "Model Linker",
-    setup: modelLinker.setup
+    setup: modelLinker.setup,
+    nodeCreated(node) {
+        // Model Linker node (added by Export): buttons only, nothing to run
+        if (node.comfyClass !== 'ModelLinker' && node.type !== 'ModelLinker') return;
+        for (const [label, tab] of [['Open Model Linker', null], ['Export…', 'export']]) {
+            const widget = node.addWidget('button', label, null, () => modelLinker.openLinkerManager(tab));
+            if (widget) widget.serialize = false;
+        }
+        node.size = [220, node.computeSize?.()[1] || 80];
+    }
 });
 
