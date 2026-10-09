@@ -7,8 +7,13 @@ Implements fuzzy string matching to find similar model names.
 import os
 import posixpath
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from difflib import SequenceMatcher
+
+try:
+    from rapidfuzz import fuzz as _rapidfuzz
+except ImportError:  # optional - difflib fallback keeps the matcher dependency-free
+    _rapidfuzz = None
 
 
 def normalize_path_separators(path: str) -> str:
@@ -54,29 +59,151 @@ def normalize_filename(filename: str) -> str:
     # Convert to lowercase
     base = base.lower()
     
-    # Normalize separators: replace underscores, hyphens, and spaces with a single space
-    base = re.sub(r'[_\-\s]+', ' ', base)
-    
+    # Normalize separators: replace underscores, hyphens, dots, and spaces with a single space
+    base = re.sub(r'[_\-.\s]+', ' ', base)
+
     # Strip whitespace
     base = base.strip()
-    
+
     return base
 
 
 def calculate_similarity(str1: str, str2: str) -> float:
     """
     Calculate similarity score between two strings (0.0 to 1.0).
-    
-    Uses SequenceMatcher to compute a ratio.
-    
+
+    Uses rapidfuzz when installed, otherwise SequenceMatcher.
+
     Args:
         str1: First string
         str2: Second string
-        
+
     Returns:
         Similarity score from 0.0 (completely different) to 1.0 (identical)
     """
+    if _rapidfuzz is not None:
+        return _rapidfuzz.ratio(str1, str2) / 100.0
     return SequenceMatcher(None, str1, str2).ratio()
+
+
+# ==================== MODEL FAMILY SCORING ====================
+#
+# Shared workflows constantly reference a different precision or quant of
+# the same model (flux1-dev-fp8 vs flux1-dev, Q4_K_M vs Q8_0). Those are
+# near-certain substitutes, while a different parameter count or model
+# generation (qwen3-4b vs qwen3-8b, qwen2 vs qwen3) is not - even though
+# plain edit distance rates both kinds of pair about the same.
+
+# Precision / quant tokens: fp8, bf16, int4, q4, iq3, tq1, nvfp4, e4m3fn, bnb4 ...
+_VARIANT_TOKEN = re.compile(
+    r'^(?:(?:bf|bfloat|fp|float|int|uint|f|i)\d+(?:mixed|scaled)?'
+    r'|(?:i?q|tq)\d+|(?:mxfp|nvfp)\d+|e\d+m\d+(?:fnuz|fn)?|bnb\d+)$'
+)
+_VARIANT_WORDS = {
+    'gguf', 'ggml', 'gptq', 'awq', 'exl2', 'hqq', 'aqlm', 'nf4', 'mixed', 'scaled',
+    'pruned', 'ema', 'emaonly', 'quant', 'quantized', 'converted', 'compressed',
+}
+# Quant heads like q4 are followed by suffix tokens: q4 k m, q5 k s, q8 0, iq4 xs
+_QUANT_HEAD = re.compile(r'^(?:i?q|tq)\d+$')
+_QUANT_TAIL = {'0', '1', '4', '8', 'k', 'm', 's', 'l', 'xl', 'xs', 'xxs', 'nl'}
+# Parameter count: 4b, 8b, 1.5b, 350m
+_CAPACITY_TOKEN = re.compile(r'^\d+(?:\.\d+)?[bmk]$')
+
+# Score floors/caps (0-1 scale)
+SAME_FAMILY_SCORE = 0.94
+SAME_SIGNATURE_SUBSET_SCORE = 0.90
+SAME_SIGNATURE_SCORE = 0.84
+CONFLICT_CAP = 0.69
+
+
+def is_variant_token(token: str) -> bool:
+    """True for precision/quantization/format tokens (fp8, q4, gguf, ...)."""
+    return token in _VARIANT_WORDS or bool(_VARIANT_TOKEN.match(token))
+
+
+def family_tokens(normalized: str) -> List[str]:
+    """
+    Tokens of a normalized filename with precision/quant tokens removed.
+
+    'flux1 dev fp8 e4m3fn' -> ['flux1', 'dev']; 'model q4 k m' -> ['model']
+    """
+    normalized = re.sub(r'\bema only\b', 'emaonly', normalized)
+    tokens = []
+    in_quant_tail = False
+    for token in normalized.split():
+        if in_quant_tail and token in _QUANT_TAIL:
+            continue
+        in_quant_tail = bool(_QUANT_HEAD.match(token))
+        if is_variant_token(token):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def model_signature(tokens: List[str]) -> Optional[Tuple[str, str]]:
+    """
+    (architecture, size) from family tokens, e.g. ['qwen3', '4b', 'it'] ->
+    ('qwen3', '4b'). None when there's no parameter-count token or the part
+    before it is too short to name an architecture.
+    """
+    for i, token in enumerate(tokens):
+        if _CAPACITY_TOKEN.match(token):
+            arch = ''.join(tokens[:i])
+            if len(arch) >= 3 and re.search(r'[a-z]', arch):
+                return arch, token
+            return None
+    return None
+
+
+def numeric_conflict(arch1: str, arch2: str) -> bool:
+    """Same name apart from version digits - qwen2 vs qwen3, sd15 vs sd21."""
+    letters1, letters2 = re.sub(r'\d', '', arch1), re.sub(r'\d', '', arch2)
+    digits1, digits2 = re.findall(r'\d+', arch1), re.findall(r'\d+', arch2)
+    return letters1 == letters2 and digits1 != digits2
+
+
+def calculate_filename_confidence(target_filename: str, candidate_filename: str) -> float:
+    """
+    Similarity (0.0-1.0) between two model filenames, aware of model families.
+
+    - identical after normalization -> 1.0 (the only way to reach 1.0)
+    - otherwise the better of the plain and word-order-independent ratio
+    - same model, different precision/quant -> at least 0.94
+    - same architecture+size, other differences -> at least 0.84/0.90
+    - different size or generation of one architecture -> at most 0.69
+    """
+    target_norm = normalize_filename(extract_filename(target_filename))
+    candidate_norm = normalize_filename(extract_filename(candidate_filename))
+    if target_norm == candidate_norm:
+        return 1.0
+
+    best = max(
+        calculate_similarity(target_norm, candidate_norm),
+        calculate_similarity(' '.join(sorted(target_norm.split())),
+                             ' '.join(sorted(candidate_norm.split()))),
+    )
+
+    target_family = family_tokens(target_norm)
+    candidate_family = family_tokens(candidate_norm)
+    if target_family and candidate_family:
+        if target_family == candidate_family:
+            best = max(best, SAME_FAMILY_SCORE)
+        else:
+            best = max(best, calculate_similarity(' '.join(target_family),
+                                                  ' '.join(candidate_family)))
+            target_sig = model_signature(target_family)
+            candidate_sig = model_signature(candidate_family)
+            if target_sig and candidate_sig:
+                if target_sig == candidate_sig:
+                    target_set, candidate_set = set(target_family), set(candidate_family)
+                    subset = target_set <= candidate_set or candidate_set <= target_set
+                    best = max(best, SAME_SIGNATURE_SUBSET_SCORE if subset else SAME_SIGNATURE_SCORE)
+                elif target_sig[0] == candidate_sig[0]:
+                    best = min(best, CONFLICT_CAP)  # different parameter count
+                elif target_sig[1] == candidate_sig[1] and numeric_conflict(target_sig[0], candidate_sig[0]):
+                    best = min(best, CONFLICT_CAP)  # different model generation
+
+    return min(best, 0.999)
 
 
 def calculate_similarity_with_normalization(str1: str, str2: str) -> float:
@@ -146,10 +273,7 @@ def find_matches(
     # Extract just the filename from target_model (remove any subfolder paths)
     # target_model might be just a filename or might include subfolder paths
     target_filename = extract_filename(target_model)
-    
-    # Normalize target filename once for exact match comparisons
-    target_norm = normalize_filename(target_filename)
-    
+
     for candidate in candidate_models:
         # Get filename from candidate (prefer 'filename' key, fallback to extracting from 'path' or 'relative_path')
         candidate_filename = candidate.get('filename')
@@ -191,35 +315,9 @@ def find_matches(
             })
             continue
         
-        # Calculate similarity comparing just filenames (not paths)
-        # This ensures we're comparing apples to apples
-        
-        # First check for exact match (after normalization) - should be 100%
-        # Only exact matches should get 100% confidence
-        candidate_norm = normalize_filename(candidate_filename)
-        
-        if target_norm == candidate_norm:
-            # Exact match after normalization = 100% confidence
-            similarity = 1.0
-        else:
-            # Calculate similarity using SequenceMatcher
-            # This gives a ratio between 0.0 and 1.0 based on longest common subsequence
-            similarity = calculate_similarity_with_normalization(target_filename, candidate_filename)
-            
-            # Also try comparing without extensions for better matching
-            target_base = os.path.splitext(target_filename)[0]
-            candidate_base = os.path.splitext(candidate_filename)[0]
-            similarity_no_ext = calculate_similarity_with_normalization(target_base, candidate_base)
-            
-            # Use the higher of the two similarity scores
-            # But ensure we never get 1.0 unless it's an exact normalized match
-            similarity = max(similarity, similarity_no_ext)
-            
-            # Cap similarity at 0.999 for non-exact matches to prevent false 100% scores
-            # SequenceMatcher can sometimes give 1.0 for very similar but not identical strings
-            # due to normalization artifacts
-            if similarity >= 0.999 and target_norm != candidate_norm:
-                similarity = 0.999
+        # Compare just filenames (not paths); only an exact normalized match
+        # reaches 100%, everything else is capped below it
+        similarity = calculate_filename_confidence(target_filename, candidate_filename)
         
         # Only include if above threshold
         if similarity >= threshold:

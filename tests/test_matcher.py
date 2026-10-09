@@ -13,6 +13,7 @@ from core.matcher import (
     normalize_path,
     extract_filename,
     find_matches,
+    calculate_filename_confidence,
 )
 
 
@@ -99,6 +100,47 @@ def test_unknown_candidate_category_not_flagged():
     matches = find_matches('model.safetensors', candidates,
                            expected_categories=['diffusion_models'])
     assert matches[0]['category_mismatch'] is False
+
+
+def confidence(target, candidate):
+    return round(calculate_filename_confidence(target, candidate) * 100, 1)
+
+
+def test_precision_variant_scores_as_same_family():
+    assert confidence('flux1-dev-fp8.safetensors', 'flux1-dev.safetensors') >= 94
+    assert confidence('flux1-dev-fp8_e4m3fn.safetensors', 'flux1-dev-bf16.safetensors') >= 94
+    assert confidence('wan2.1_t2v_14B_fp16.safetensors', 'wan2.1_t2v_14B_fp8_scaled.safetensors') >= 94
+
+
+def test_quant_variant_scores_as_same_family():
+    assert confidence('model-Q4_K_M.gguf', 'model-Q8_0.gguf') >= 94
+    assert confidence('flux1-dev-Q5_K_S.gguf', 'flux1-dev-IQ4_XS.gguf') >= 94
+
+
+def test_family_variant_never_reaches_100():
+    assert confidence('flux1-dev-fp8.safetensors', 'flux1-dev.safetensors') < 100
+
+
+def test_different_parameter_count_capped():
+    assert confidence('qwen3-4b.safetensors', 'qwen3-8b.safetensors') <= 69
+    assert confidence('qwen_3_4b_fp8.safetensors', 'qwen_3_8b.safetensors') <= 69
+
+
+def test_different_generation_capped():
+    assert confidence('qwen2-7b-instruct.safetensors', 'qwen3-7b-instruct.safetensors') <= 69
+
+
+def test_word_order_ignored():
+    assert confidence('realistic_vision_lora.safetensors', 'lora_realistic_vision.safetensors') >= 94
+
+
+def test_family_scoring_ranks_variant_first():
+    candidates = [
+        {'filename': 'qwen3-8b.safetensors', 'path': '/x/qwen3-8b.safetensors'},
+        {'filename': 'qwen3-4b-fp8.safetensors', 'path': '/x/qwen3-4b-fp8.safetensors'},
+    ]
+    matches = find_matches('qwen3-4b.safetensors', candidates)
+    assert matches[0]['filename'] == 'qwen3-4b-fp8.safetensors'
 
 
 if __name__ == '__main__':
