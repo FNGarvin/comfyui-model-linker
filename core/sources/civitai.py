@@ -44,11 +44,14 @@ def parse_civitai_url(url: str) -> Optional[Dict[str, Any]]:
 
 
 def get_civitai_download_url(version_id: int, api_key: Optional[str] = None) -> str:
-    """Get download URL for a CivitAI model version."""
-    url = f"https://civitai.com/api/download/models/{version_id}"
-    if api_key:
-        url += f"?token={api_key}"
-    return url
+    """
+    Get the public download URL for a CivitAI model version.
+
+    The API key is deliberately not embedded: URLs are shown in the UI and
+    can end up in shared workflows. The downloader sends the key as an
+    Authorization header instead. (api_key is kept for compatibility.)
+    """
+    return f"https://civitai.com/api/download/models/{version_id}"
 
 
 def clean_filename_for_search(filename: str) -> str:

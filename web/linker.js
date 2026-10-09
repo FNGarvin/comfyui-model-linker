@@ -212,6 +212,33 @@ class LinkerManagerDialog extends ComfyDialog {
             .ml-all-toolbar {
                 margin-bottom: 12px;
             }
+            .ml-settings-section {
+                margin-bottom: 20px;
+            }
+            .ml-settings-section h3 {
+                margin: 0 0 6px 0;
+                font-size: 14px;
+                color: var(--ml-text, #ddd);
+            }
+            .ml-settings-hint {
+                margin: 0 0 8px 0;
+                font-size: 12px;
+                color: var(--ml-text-muted, #999);
+            }
+            .ml-settings-row {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+            .ml-settings-row .ml-filter-input {
+                flex: 1;
+            }
+            .ml-settings-status {
+                margin-top: 6px;
+                font-size: 12px;
+                min-height: 16px;
+                color: var(--ml-text-muted, #999);
+            }
             .ml-filter-input {
                 width: 100%;
                 padding: 8px 10px;
@@ -771,6 +798,24 @@ class LinkerManagerDialog extends ComfyDialog {
                 }
             }),
             $el("button", {
+                textContent: "⚙",
+                title: "Settings (API tokens)",
+                onclick: () => this.switchTab(this.activeTab === 'settings' ? 'missing' : 'settings'),
+                style: {
+                    background: "none",
+                    border: "none",
+                    fontSize: "18px",
+                    cursor: "pointer",
+                    color: "var(--input-text)",
+                    padding: "0",
+                    width: "30px",
+                    height: "30px",
+                    marginLeft: "auto",
+                    marginRight: "4px",
+                    borderRadius: "4px"
+                }
+            }),
+            $el("button", {
                 textContent: "×",
                 onclick: () => this.close(),
                 style: {
@@ -815,7 +860,7 @@ class LinkerManagerDialog extends ComfyDialog {
         const resolved = this.analyzeData?.resolved_models?.length ?? 0;
         this.missingTabBtn.textContent = `Missing (${missing})`;
         this.allTabBtn.textContent = `All models (${missing + resolved})`;
-        this.missingTabBtn.classList.toggle('ml-tab-active', this.activeTab !== 'all');
+        this.missingTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'missing' || !this.activeTab);
         this.allTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'all');
     }
 
@@ -824,9 +869,146 @@ class LinkerManagerDialog extends ComfyDialog {
         this.updateTabBar();
         if (this.activeTab === 'all') {
             this.renderAllModelsTab(this.contentElement);
+        } else if (this.activeTab === 'settings') {
+            this.renderSettingsTab(this.contentElement);
         } else {
             this.displayMissingModels(this.contentElement, this.analyzeData || {});
             this.reconnectActiveDownloads();
+        }
+    }
+
+    /**
+     * Settings: API tokens (stored server-side, never sent back to the
+     * browser) and dialog behaviour.
+     */
+    async renderSettingsTab(container) {
+        const providers = [
+            { id: 'huggingface', key: 'hf_token', title: 'HuggingFace token',
+              hint: 'Needed for gated or private models (e.g. FLUX.1-dev). Create a read token at huggingface.co/settings/tokens.' },
+            { id: 'civitai', key: 'civitai_key', title: 'CivitAI API key',
+              hint: 'Needed for models that require login. Create one at civitai.com/user/account under API Keys.' }
+        ];
+
+        let html = '';
+        for (const p of providers) {
+            html += `
+                <div class="ml-settings-section">
+                    <h3>${p.title}</h3>
+                    <p class="ml-settings-hint">${p.hint}</p>
+                    <div class="ml-settings-row">
+                        <input type="password" class="ml-filter-input" data-token-input="${p.id}" autocomplete="off" spellcheck="false">
+                        <button class="ml-btn ml-btn-primary ml-btn-sm" data-token-save="${p.id}">Save</button>
+                        <button class="ml-btn ml-btn-secondary ml-btn-sm" data-token-check="${p.id}">Check</button>
+                        <button class="ml-btn ml-btn-secondary ml-btn-sm" data-token-clear="${p.id}">Clear</button>
+                    </div>
+                    <div class="ml-settings-status" data-token-status="${p.id}"></div>
+                </div>`;
+        }
+        const autoOpen = localStorage.getItem('modelLinker.autoOpenOnMissing') !== 'false';
+        html += `
+            <div class="ml-settings-section">
+                <h3>Behaviour</h3>
+                <label class="ml-settings-row" style="cursor: pointer;">
+                    <input type="checkbox" data-setting-autoopen ${autoOpen ? 'checked' : ''}>
+                    <span>Open Model Linker automatically when a workflow has missing models</span>
+                </label>
+            </div>`;
+        container.innerHTML = html;
+
+        const statusEl = (id) => container.querySelector(`[data-token-status="${id}"]`);
+        const setStatus = (id, text, color = '') => {
+            const el = statusEl(id);
+            if (!el) return;
+            el.textContent = text;
+            el.style.color = color;
+        };
+
+        const renderView = (view) => {
+            for (const p of providers) {
+                const info = view?.[p.id] || {};
+                const input = container.querySelector(`[data-token-input="${p.id}"]`);
+                if (!input) continue;
+                input.value = '';
+                input.placeholder = info.set
+                    ? (info.source === 'env'
+                        ? `Using the ${info.env_var} environment variable (${info.hint})`
+                        : `Saved (${info.hint}) - paste a new one to replace it`)
+                    : 'Not set';
+                container.querySelector(`[data-token-clear="${p.id}"]`).disabled = info.source !== 'settings';
+                container.querySelector(`[data-token-check="${p.id}"]`).disabled = !info.set;
+                setStatus(p.id, '');
+            }
+        };
+
+        const save = async (providerId, value) => {
+            const p = providers.find(x => x.id === providerId);
+            const response = await api.fetchApi('/model_linker/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ [p.key]: value })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || `API error: ${response.status}`);
+            renderView(data);
+        };
+
+        const check = async (id) => {
+            setStatus(id, 'Checking...');
+            try {
+                const response = await api.fetchApi(`/model_linker/settings/check/${id}`, { method: 'POST' });
+                const result = await response.json();
+                if (result.ok) {
+                    setStatus(id, `✓ Valid${result.user ? ` - signed in as ${result.user}` : ''}`, '#4CAF50');
+                } else {
+                    setStatus(id, `✗ ${result.error || 'Invalid token'}`, '#f44336');
+                }
+            } catch (error) {
+                setStatus(id, `✗ ${error.message}`, '#f44336');
+            }
+        };
+
+        container.querySelectorAll('[data-token-save]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const id = btn.dataset.tokenSave;
+                const value = container.querySelector(`[data-token-input="${id}"]`).value.trim();
+                if (!value) {
+                    setStatus(id, 'Paste a token first.');
+                    return;
+                }
+                try {
+                    await save(id, value);
+                    await check(id);
+                } catch (error) {
+                    setStatus(id, `✗ ${error.message}`, '#f44336');
+                }
+            });
+        });
+
+        container.querySelectorAll('[data-token-clear]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const id = btn.dataset.tokenClear;
+                try {
+                    await save(id, '');
+                } catch (error) {
+                    setStatus(id, `✗ ${error.message}`, '#f44336');
+                }
+            });
+        });
+
+        container.querySelectorAll('[data-token-check]').forEach(btn => {
+            btn.addEventListener('click', () => check(btn.dataset.tokenCheck));
+        });
+
+        container.querySelector('[data-setting-autoopen]')?.addEventListener('change', (e) => {
+            localStorage.setItem('modelLinker.autoOpenOnMissing', e.target.checked ? 'true' : 'false');
+        });
+
+        try {
+            const response = await api.fetchApi('/model_linker/settings');
+            if (!response.ok) throw new Error(`API error: ${response.status}`);
+            renderView(await response.json());
+        } catch (error) {
+            console.error('Model Linker: Could not load settings:', error);
         }
     }
 
@@ -2352,6 +2534,13 @@ class LinkerManagerDialog extends ComfyDialog {
             } else if (progress.status === 'error') {
                 if (progressDiv) {
                     progressDiv.innerHTML = this.renderStatusMessage(progress.error || 'Download failed', 'error');
+                    if (progress.auth_required) {
+                        progressDiv.appendChild($el("button.ml-btn.ml-btn-secondary.ml-btn-sm", {
+                            textContent: "⚙ Open settings",
+                            style: { marginTop: "6px" },
+                            onclick: () => this.switchTab('settings')
+                        }));
+                    }
                 }
                 if (downloadBtn) {
                     downloadBtn.disabled = false;

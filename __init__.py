@@ -62,6 +62,10 @@ class ModelLinkerExtension:
                 self.logger.error(f"Model Linker: Could not import core modules: {e}")
                 return False
             
+            from .core.settings import (
+                public_view, save_settings, check_token, get_token, auth_headers_for_url
+            )
+
             # Import download modules
             try:
                 from .core.downloader import (
@@ -169,7 +173,7 @@ class ModelLinkerExtension:
                                     continue
                                 
                                 # 3. Search HuggingFace (exact_only=True for downloads)
-                                hf_result = search_huggingface_for_file(filename, exact_only=True)
+                                hf_result = search_huggingface_for_file(filename, token=get_token('huggingface'), exact_only=True)
                                 if hf_result:
                                     missing['download_source'] = {
                                         'source': 'huggingface',
@@ -182,7 +186,7 @@ class ModelLinkerExtension:
                                     continue
                                 
                                 # 4. Search CivitAI (exact_only=True for downloads)
-                                civitai_result = search_civitai_for_file(filename, exact_only=True)
+                                civitai_result = search_civitai_for_file(filename, api_key=get_token('civitai'), exact_only=True)
                                 if civitai_result:
                                     missing['download_source'] = {
                                         'source': 'civitai',
@@ -267,6 +271,39 @@ class ModelLinkerExtension:
                         status=500
                     )
             
+            # ==================== SETTINGS ROUTES ====================
+
+            @routes.get("/model_linker/settings")
+            async def get_settings_route(request):
+                """Token status for the settings panel - never the tokens themselves."""
+                return web.json_response(public_view())
+
+            @routes.post("/model_linker/settings")
+            async def save_settings_route(request):
+                """Save or clear tokens: {hf_token?, civitai_key?}; '' clears."""
+                try:
+                    data = await request.json()
+                    updates = {}
+                    for key in ('hf_token', 'civitai_key'):
+                        if key in data:
+                            value = data.get(key)
+                            if value is not None and not isinstance(value, str):
+                                return web.json_response({'error': f'{key} must be a string'}, status=400)
+                            updates[key] = (value or '').strip()
+                    save_settings(updates)
+                    return web.json_response(public_view())
+                except Exception as e:
+                    self.logger.error(f"Model Linker settings error: {e}", exc_info=True)
+                    return web.json_response({'error': str(e)}, status=500)
+
+            @routes.post("/model_linker/settings/check/{provider}")
+            async def check_settings_route(request):
+                """Validate a stored token against the provider's API."""
+                import asyncio
+                provider = request.match_info['provider']
+                result = await asyncio.to_thread(check_token, provider)
+                return web.json_response(result)
+
             # ==================== DOWNLOAD ROUTES ====================
             
             if download_available:
@@ -312,14 +349,14 @@ class ModelLinkerExtension:
                         
                         # 3. Search HuggingFace for exact file match
                         if not results['found']:
-                            hf_result = search_huggingface_for_file(filename)
+                            hf_result = search_huggingface_for_file(filename, token=get_token('huggingface'))
                             if hf_result:
                                 results['huggingface'] = hf_result
                                 results['found'] = True
                         
                         # 4. Search CivitAI for exact file match
                         if not results['found']:
-                            civitai_result = search_civitai_for_file(filename)
+                            civitai_result = search_civitai_for_file(filename, api_key=get_token('civitai'))
                             if civitai_result:
                                 results['civitai'] = civitai_result
                                 results['found'] = True
@@ -361,16 +398,11 @@ class ModelLinkerExtension:
                                 status=400
                             )
                         
-                        # Build headers if needed
-                        headers = {}
-                        if 'huggingface.co' in url:
-                            hf_token = data.get('hf_token', '')
-                            if hf_token:
-                                headers['Authorization'] = f'Bearer {hf_token}'
-                        elif 'civitai.com' in url:
-                            civitai_key = data.get('civitai_key', '')
-                            if civitai_key and 'token=' not in url:
-                                url += f"{'&' if '?' in url else '?'}token={civitai_key}"
+                        # Tokens come from the server-side settings, never
+                        # from the browser; sent as a header (not in the URL)
+                        # so they don't end up in logs. requests drops the
+                        # header when CivitAI redirects to its file storage.
+                        headers = auth_headers_for_url(url)
                         
                         # Start background download
                         download_id = start_background_download(

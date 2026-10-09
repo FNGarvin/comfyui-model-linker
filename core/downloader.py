@@ -290,14 +290,21 @@ def download_file(
         
     except requests.exceptions.RequestException as e:
         error_msg = str(e)
+        auth_required = None
         # Check for specific HTTP errors
         if hasattr(e, 'response') and e.response is not None:
             status_code = e.response.status_code
             if status_code in [401, 403]:
+                has_token = bool(headers and headers.get('Authorization'))
                 if 'huggingface.co' in url:
-                    error_msg = f"Unauthorized (HTTP {status_code}): HuggingFace token may be required."
+                    auth_required = 'huggingface'
+                    error_msg = (f"HuggingFace rejected the token (HTTP {status_code}) - check it in Model Linker settings, "
+                                 "and accept the model's terms on its page." if has_token else
+                                 f"HuggingFace token required (HTTP {status_code}) - add one in Model Linker settings.")
                 elif 'civitai.com' in url:
-                    error_msg = f"Unauthorized (HTTP {status_code}): CivitAI API key may be required."
+                    auth_required = 'civitai'
+                    error_msg = (f"CivitAI rejected the API key (HTTP {status_code}) - check it in Model Linker settings." if has_token else
+                                 f"CivitAI API key required (HTTP {status_code}) - add one in Model Linker settings.")
                 else:
                     error_msg = f"Unauthorized (HTTP {status_code}): Authentication required."
             elif status_code == 404:
@@ -306,6 +313,7 @@ def download_file(
         with download_lock:
             download_progress[download_id]['status'] = 'error'
             download_progress[download_id]['error'] = error_msg
+            download_progress[download_id]['auth_required'] = auth_required
         result['error'] = error_msg
         
         # CLI error log
