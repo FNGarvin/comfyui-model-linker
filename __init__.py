@@ -68,6 +68,8 @@ class ModelLinkerExtension:
 
             # Import download modules
             try:
+                from .core.source_chain import find_download_source, find_by_hash
+                from .core.sources import hf_index
                 from .core.downloader import (
                     start_background_download, get_progress, get_all_progress,
                     cancel_download, get_download_directory
@@ -81,6 +83,24 @@ class ModelLinkerExtension:
                 self.logger.warning(f"Model Linker: Download features not available: {e}")
                 download_available = False
             
+            import asyncio
+
+            def attach_download_sources(missing_models):
+                """Attach a download_source to each missing model without a 100% local match."""
+                for missing in missing_models:
+                    matches = missing.get('matches', [])
+                    if any(m.get('confidence', 0) == 100 for m in matches):
+                        continue
+                    source = find_download_source(
+                        missing.get('original_path', ''),
+                        category=missing.get('category', ''),
+                        workflow_url=missing.get('workflow_url', ''),
+                        workflow_directory=missing.get('workflow_directory', ''),
+                        sha256=missing.get('workflow_sha256', ''),
+                    )
+                    if source:
+                        missing['download_source'] = source
+
             # ==================== ANALYZE ROUTES ====================
             
             @routes.post("/model_linker/analyze")
@@ -96,107 +116,16 @@ class ModelLinkerExtension:
                             status=400
                         )
                     
-                    # Analyze and find matches
+                    # Analyze and find matches, then look up download sources
+                    # for models without a 100% local match. Both block on
+                    # disk/network, so keep them off the event loop.
                     include_resolved = bool(data.get('include_resolved', False))
-                    result = analyze_and_find_matches(workflow_json, include_resolved=include_resolved)
-                    
-                    # If download available, auto-search for download sources when no 100% local match
+                    result = await asyncio.to_thread(
+                        analyze_and_find_matches, workflow_json, include_resolved=include_resolved)
+
                     if download_available:
-                        for missing in result.get('missing_models', []):
-                            # Check if there's a 100% local match
-                            matches = missing.get('matches', [])
-                            has_perfect_match = any(m.get('confidence', 0) == 100 for m in matches)
-                            
-                            if not has_perfect_match:
-                                filename = missing.get('original_path', '').split('/')[-1].split('\\')[-1]
-                                
-                                # 0. Check workflow URL first (highest priority - directly from workflow)
-                                workflow_url = missing.get('workflow_url', '')
-                                if workflow_url:
-                                    # Determine source from URL
-                                    if 'huggingface.co' in workflow_url:
-                                        source = 'huggingface'
-                                    elif 'civitai.com' in workflow_url:
-                                        source = 'civitai'
-                                    else:
-                                        source = 'workflow'
-                                    
-                                    # Try to get file size with HEAD request (non-blocking, timeout quickly)
-                                    file_size = None
-                                    try:
-                                        import requests
-                                        head_response = requests.head(workflow_url, allow_redirects=True, timeout=5)
-                                        if head_response.status_code == 200:
-                                            file_size = int(head_response.headers.get('content-length', 0))
-                                    except Exception:
-                                        pass  # Size unknown is fine
-                                    
-                                    missing['download_source'] = {
-                                        'source': source,
-                                        'url': workflow_url,
-                                        'filename': filename,
-                                        'directory': missing.get('workflow_directory', '') or missing.get('category', 'checkpoints'),
-                                        'match_type': 'exact',
-                                        'url_source': 'workflow',
-                                        'size': file_size
-                                    }
-                                    continue
-                                
-                                # 1. Check popular models (always exact match)
-                                popular_info = get_popular_model_url(filename)
-                                if popular_info:
-                                    missing['download_source'] = {
-                                        'source': 'popular',
-                                        'url': popular_info.get('url'),
-                                        'filename': filename,
-                                        'type': popular_info.get('type'),
-                                        'directory': popular_info.get('directory'),
-                                        'match_type': 'exact'
-                                    }
-                                    continue
-                                
-                                # 2. Check model list (ComfyUI Manager database)
-                                # Use exact_only=True to avoid confusing fuzzy matches for downloads
-                                model_list_result = search_model_list(filename, exact_only=True)
-                                if model_list_result:
-                                    missing['download_source'] = {
-                                        'source': 'model_list',
-                                        'url': model_list_result.get('url'),
-                                        'filename': model_list_result.get('filename'),
-                                        'name': model_list_result.get('name'),
-                                        'type': model_list_result.get('type'),
-                                        'directory': model_list_result.get('directory'),
-                                        'size': model_list_result.get('size'),
-                                        'match_type': model_list_result.get('match_type'),
-                                        'confidence': model_list_result.get('confidence')
-                                    }
-                                    continue
-                                
-                                # 3. Search HuggingFace (exact_only=True for downloads)
-                                hf_result = search_huggingface_for_file(filename, token=get_token('huggingface'), exact_only=True)
-                                if hf_result:
-                                    missing['download_source'] = {
-                                        'source': 'huggingface',
-                                        'url': hf_result.get('url'),
-                                        'filename': hf_result.get('filename'),
-                                        'name': hf_result.get('repo_id', ''),
-                                        'size': hf_result.get('size', ''),
-                                        'match_type': hf_result.get('match_type', 'exact')
-                                    }
-                                    continue
-                                
-                                # 4. Search CivitAI (exact_only=True for downloads)
-                                civitai_result = search_civitai_for_file(filename, api_key=get_token('civitai'), exact_only=True)
-                                if civitai_result:
-                                    missing['download_source'] = {
-                                        'source': 'civitai',
-                                        'url': civitai_result.get('download_url'),  # CivitAI uses download_url
-                                        'filename': civitai_result.get('filename'),
-                                        'name': civitai_result.get('name', ''),
-                                        'size': civitai_result.get('size', ''),
-                                        'match_type': civitai_result.get('match_type', 'exact')
-                                    }
-                    
+                        await asyncio.to_thread(attach_download_sources, result.get('missing_models', []))
+
                     return web.json_response(result)
                 except Exception as e:
                     self.logger.error(f"Model Linker analyze error: {e}", exc_info=True)
@@ -347,14 +276,28 @@ class ModelLinkerExtension:
                                 results['model_list'] = model_list_result
                                 results['found'] = True
                         
-                        # 3. Search HuggingFace for exact file match
+                        # 3. Bundled Comfy-Org/Kijai index, then hash lookups
+                        if not results['found']:
+                            index_result = hf_index.lookup_by_filename(filename)
+                            if index_result:
+                                results['huggingface'] = {**index_result, 'repo_id': index_result['repo_id']}
+                                results['found'] = True
+                        sha256 = data.get('sha256', '')
+                        if not results['found'] and sha256:
+                            hash_result = await asyncio.to_thread(find_by_hash, sha256, filename)
+                            if hash_result:
+                                key = 'civitai' if hash_result.get('source') == 'civitai' else 'huggingface'
+                                results[key] = {**hash_result, 'download_url': hash_result['url']}
+                                results['found'] = True
+
+                        # 4. Search HuggingFace for exact file match
                         if not results['found']:
                             hf_result = search_huggingface_for_file(filename, token=get_token('huggingface'))
                             if hf_result:
                                 results['huggingface'] = hf_result
                                 results['found'] = True
                         
-                        # 4. Search CivitAI for exact file match
+                        # 5. Search CivitAI for exact file match
                         if not results['found']:
                             civitai_result = search_civitai_for_file(filename, api_key=get_token('civitai'))
                             if civitai_result:

@@ -1883,7 +1883,10 @@ class LinkerManagerDialog extends ComfyDialog {
                 'civitai': 'CivitAI',
                 'workflow': 'Workflow'
             };
-            const sourceLabel = isFromWorkflow ? 'Workflow' : (sourceLabels[downloadSource.source] || 'Online');
+            let sourceLabel = isFromWorkflow ? 'Workflow' : (sourceLabels[downloadSource.source] || 'Online');
+            if (downloadSource.url_source === 'hf_index') sourceLabel = 'HuggingFace (Comfy-Org/Kijai index)';
+            if (downloadSource.url_source === 'civarchive') sourceLabel = `CivArchive (${sourceLabels[downloadSource.source] || 'mirror'})`;
+            if (downloadSource.match_type === 'hash') sourceLabel += ' · hash match';
             const downloadFilename = downloadSource.filename || filename;
             
             // Format file size
@@ -2633,7 +2636,7 @@ class LinkerManagerDialog extends ComfyDialog {
             const response = await api.fetchApi('/model_linker/search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename, category })
+                body: JSON.stringify({ filename, category, sha256: missing.workflow_sha256 || '' })
             });
 
             if (!response.ok) {

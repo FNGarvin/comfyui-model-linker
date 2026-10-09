@@ -71,6 +71,26 @@ def clean_filename_for_search(filename: str) -> str:
     return base
 
 
+def build_search_queries(filename: str) -> List[str]:
+    """
+    Search queries for a filename: its stem, then the stem cut at the first
+    precision/quant token (flux1-dev-fp8_e4m3fn -> flux1-dev). Repo names
+    rarely carry those suffixes, so the shorter query finds the repo.
+    """
+    from ..matcher import is_variant_token
+
+    stem = os.path.splitext(filename.replace('\\', '/').rsplit('/', 1)[-1])[0]
+    queries = [stem]
+    for token in re.finditer(r'[^-_.\s]+', stem):
+        if is_variant_token(token.group().lower()):
+            cut = stem[:token.start()].rstrip('-_. ')
+            if cut:
+                queries.append(cut)
+            break
+    seen = set()
+    return [q for q in queries if q and not (q.lower() in seen or seen.add(q.lower()))]
+
+
 def search_huggingface_for_file(
     filename: str,
     token: Optional[str] = None,
@@ -79,99 +99,100 @@ def search_huggingface_for_file(
     """
     Search HuggingFace for a specific model file.
     Returns the first repo that contains a matching file.
-    
+
     Args:
         filename: Filename to search for
         token: Optional HF token
         exact_only: If True, only return exact filename matches (for downloads).
                    If False, also try partial matching (for local file resolution).
-        
+
     Returns:
         Dict with url, repo, filename if found, None otherwise
     """
     global _search_cache
-    
+
     cache_key = f"hf_{filename}_exact{exact_only}"
     if cache_key in _search_cache:
         return _search_cache[cache_key]
-    
+
+    target_name = filename.replace('\\', '/').rsplit('/', 1)[-1]
+    filename_base = os.path.splitext(target_name)[0].lower()
+
+    headers = {}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+
+    checked_repos = set()
+    partial_result = None
     try:
-        # Use filename without extension for search
-        filename_base = os.path.splitext(filename)[0].lower()
-        
-        headers = {}
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
-        
-        # Search for repos containing this filename
-        search_url = f"{HF_API_URL}/models?search={quote(filename_base)}&limit=10"
-        
-        response = requests.get(search_url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.debug(f"HuggingFace search returned {response.status_code}")
-            return None
-        
-        repos = response.json()
-        
-        for repo in repos:
-            repo_id = repo.get('id', '')
-            if not repo_id:
+        for query in build_search_queries(target_name):
+            # Search for repos matching this query
+            search_url = f"{HF_API_URL}/models?search={quote(query)}&limit=10"
+            response = requests.get(search_url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.debug(f"HuggingFace search returned {response.status_code}")
                 continue
-            
-            # Check if this repo actually has a matching file
-            files_url = f"{HF_API_URL}/models/{repo_id}/tree/main"
-            
-            try:
-                files_response = requests.get(files_url, headers=headers, timeout=10)
-                if files_response.status_code == 200:
+
+            for repo in response.json():
+                repo_id = repo.get('id', '')
+                if not repo_id or repo_id in checked_repos:
+                    continue
+                checked_repos.add(repo_id)
+
+                # List every file, including subfolders (split_files/...)
+                files_url = f"{HF_API_URL}/models/{repo_id}/tree/main?recursive=true"
+                try:
+                    files_response = requests.get(files_url, headers=headers, timeout=10)
+                    if files_response.status_code != 200:
+                        continue
                     files = files_response.json()
-                    
-                    for file_info in files:
-                        file_path = file_info.get('path', '')
-                        file_base = os.path.splitext(os.path.basename(file_path))[0].lower()
-                        
-                        # Check for exact match first (always try this)
-                        if file_path.endswith(filename):
-                            result = {
+                except Exception as e:
+                    logger.debug(f"Error checking repo {repo_id}: {e}")
+                    continue
+
+                for file_info in files:
+                    if file_info.get('type', 'file') != 'file':
+                        continue
+                    file_path = file_info.get('path', '')
+                    file_name = os.path.basename(file_path)
+                    size = (file_info.get('lfs') or {}).get('size', file_info.get('size'))
+
+                    if file_name == target_name:
+                        result = {
+                            'source': 'huggingface',
+                            'repo_id': repo_id,
+                            'filename': file_name,
+                            'path': file_path,
+                            'url': get_huggingface_download_url(repo_id, file_path),
+                            'size': size,
+                            'match_type': 'exact'
+                        }
+                        _search_cache[cache_key] = result
+                        logger.info(f"Found {filename} on HuggingFace: {repo_id}")
+                        return result
+
+                    # Partial matches only count when no exact match turns
+                    # up anywhere - and never for downloads (exact_only)
+                    if not exact_only and partial_result is None:
+                        file_base = os.path.splitext(file_name)[0].lower()
+                        if (filename_base in file_base or file_base in filename_base) and \
+                                file_path.endswith(('.safetensors', '.ckpt')):
+                            partial_result = {
                                 'source': 'huggingface',
                                 'repo_id': repo_id,
-                                'filename': os.path.basename(file_path),
+                                'filename': file_name,
                                 'path': file_path,
                                 'url': get_huggingface_download_url(repo_id, file_path),
-                                'size': file_info.get('size'),
-                                'match_type': 'exact'
+                                'size': size,
+                                'match_type': 'partial'
                             }
-                            _search_cache[cache_key] = result
-                            logger.info(f"Found {filename} on HuggingFace: {repo_id}")
-                            return result
-                        
-                        # Check for partial match (filename_base in file_base or vice versa)
-                        # Skip partial matches if exact_only is True - prevents confusing
-                        # users with wrong model suggestions for downloads
-                        if not exact_only:
-                            if filename_base in file_base or file_base in filename_base:
-                                if file_path.endswith('.safetensors') or file_path.endswith('.ckpt'):
-                                    result = {
-                                        'source': 'huggingface',
-                                        'repo_id': repo_id,
-                                        'filename': os.path.basename(file_path),
-                                        'path': file_path,
-                                        'url': get_huggingface_download_url(repo_id, file_path),
-                                        'size': file_info.get('size'),
-                                        'match_type': 'partial'
-                                    }
-                                    _search_cache[cache_key] = result
-                                    logger.info(f"Found similar file for {filename} on HuggingFace: {repo_id}/{file_path}")
-                                    return result
-                            
-            except Exception as e:
-                logger.debug(f"Error checking repo {repo_id}: {e}")
-                continue
-        
-        # Not found
-        _search_cache[cache_key] = None
-        return None
-        
+
+        if partial_result:
+            logger.info(f"Found similar file for {filename} on HuggingFace: "
+                        f"{partial_result['repo_id']}/{partial_result['path']}")
+        _search_cache[cache_key] = partial_result
+        return partial_result
+
     except Exception as e:
         logger.error(f"HuggingFace search error: {e}")
         return None

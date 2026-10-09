@@ -30,14 +30,16 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
     Extract model URLs from workflow JSON.
     
     Sources:
-    1. node.properties.models array - contains {name, url, directory}
+    1. node.properties.models array - contains {name, url, directory} and
+       optionally {hash, hash_type} (ComfyUI's model metadata format)
     2. Regex extraction from workflow JSON string - finds HuggingFace/CivitAI URLs
+    3. extra.model_resolver_hashes - SHA-256s embedded by ComfyUI-Model-Resolver
     
     Args:
         workflow_json: Complete workflow JSON dictionary
         
     Returns:
-        Dict mapping model filename -> {url, directory, source}
+        Dict mapping model filename -> {url, directory, source, sha256?}
     """
     url_map = {}
     
@@ -63,7 +65,10 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
                 name = model_info.get('name', '')
                 url = model_info.get('url', '')
                 directory = model_info.get('directory', '')
-                
+                sha256 = ''
+                if str(model_info.get('hash_type') or 'sha256').lower() == 'sha256':
+                    sha256 = _clean_sha256(model_info.get('hash'))
+
                 if name and name not in url_map:
                     url_map[name] = {
                         'url': url,
@@ -71,7 +76,22 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
                         'node_type': node_type,
                         'source': 'node_properties'
                     }
+                    if sha256:
+                        url_map[name]['sha256'] = sha256
     
+    # 1b. SHA-256s embedded by ComfyUI-Model-Resolver ("Embed workflow hashes")
+    resolver_hashes = (workflow_json.get('extra') or {}).get('model_resolver_hashes') or {}
+    for entry in resolver_hashes.get('models') or []:
+        if not isinstance(entry, dict):
+            continue
+        sha256 = _clean_sha256(entry.get('sha256'))
+        path = entry.get('path')
+        if not sha256 or not isinstance(path, str) or not path:
+            continue
+        name = path.replace('\\', '/').rsplit('/', 1)[-1]
+        url_map.setdefault(name, {'url': '', 'directory': '', 'source': 'model_resolver_hashes'})
+        url_map[name].setdefault('sha256', sha256)
+
     # 2. Extract URLs via regex from workflow JSON
     urls_found = URL_PATTERN.findall(workflow_str)
     
@@ -136,6 +156,13 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
                 break
     
     return url_map
+
+
+def _clean_sha256(value: Any) -> str:
+    """Lowercase SHA-256 hex digest, or '' if value isn't one."""
+    if isinstance(value, str) and re.fullmatch(r'[0-9a-fA-F]{64}', value.strip()):
+        return value.strip().lower()
+    return ''
 
 
 def parse_huggingface_url(url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -224,6 +251,8 @@ def analyze_and_find_matches(
             missing['workflow_url'] = url_info.get('url', '')
             missing['workflow_directory'] = url_info.get('directory', '')
             missing['url_source'] = url_info.get('source', '')
+            if url_info.get('sha256'):
+                missing['workflow_sha256'] = url_info['sha256']
     
     # Find matches for each missing model
     missing_with_matches = []
