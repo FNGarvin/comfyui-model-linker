@@ -9,7 +9,7 @@ import re
 import logging
 import requests
 from typing import Dict, Any, Optional, List
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, unquote
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ def parse_huggingface_url(url: str) -> Optional[Dict[str, str]]:
         parts = url[5:].split('/', 2)
         if len(parts) >= 3:
             return {
-                'repo': f"{parts[0]}/{parts[1]}",
-                'filename': parts[2]
+                'repo': unquote(f"{parts[0]}/{parts[1]}"),
+                'filename': unquote(parts[2])
             }
         return None
     
@@ -47,9 +47,9 @@ def parse_huggingface_url(url: str) -> Optional[Dict[str, str]]:
     match = re.match(r'^/([^/]+/[^/]+)/(resolve|blob)/([^/]+)/(.+)$', parsed.path)
     if match:
         return {
-            'repo': match.group(1),
-            'branch': match.group(3),
-            'filename': match.group(4)
+            'repo': unquote(match.group(1)),
+            'branch': unquote(match.group(3)),
+            'filename': unquote(match.group(4))
         }
     
     return None

@@ -34,6 +34,14 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 4. Link individual matches, use **Auto-Link** for all 100% matches, or **Download All Missing** for models with known sources
 5. Save your workflow when ready
 
+## HuggingFace downloads
+
+Files from huggingface.co are downloaded with `huggingface_hub` (multiple connections via `hf_xet` where available), which is much faster than a single stream on fast links. CivitAI and other URLs use the built-in downloader. If `huggingface_hub` is missing or older than 1.1.0 (for example with transformers 4.x), HuggingFace downloads use the built-in downloader too.
+
+Gated models need a HuggingFace token: add one in the Settings tab (⚙), or set `HF_TOKEN` in the environment ComfyUI runs in. A **Read**-scoped token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) is enough. You also need to accept the model's terms on its HuggingFace page once. Downloads never use a token cached by `hf auth login`.
+
+Files are staged in a hidden folder next to the destination and moved into place when complete. `hf_xet` wrote no chunk cache to `HF_HOME` in testing, only about 60 KB of logs per run. If ComfyUI is killed mid-download, the hidden `.model_linker_tmp_*` folder in the destination can keep the partial file (up to the full model size) and is safe to delete.
+
 ## License
 
 [MIT](LICENSE)
