@@ -852,24 +852,19 @@ class LinkerManagerDialog extends ComfyDialog {
                     fontWeight: "600"
                 }
             }),
-            $el("button", {
-                textContent: "⚙",
-                title: "Settings (API tokens)",
+            this.settingsButton = $el("button.ml-btn.ml-btn-secondary", {
+                title: "API tokens and behaviour",
                 onclick: () => this.switchTab(this.activeTab === 'settings' ? 'missing' : 'settings'),
                 style: {
-                    background: "none",
-                    border: "none",
-                    fontSize: "18px",
-                    cursor: "pointer",
-                    color: "var(--input-text)",
-                    padding: "0",
-                    width: "30px",
-                    height: "30px",
                     marginLeft: "auto",
-                    marginRight: "4px",
-                    borderRadius: "4px"
+                    marginRight: "8px",
+                    padding: "6px 14px",
+                    fontSize: "13px"
                 }
-            }),
+            }, [
+                $el("span.ml-btn-icon", { textContent: "⚙", style: { fontSize: "15px" } }),
+                $el("span", { textContent: " Settings" })
+            ]),
             $el("button", {
                 textContent: "×",
                 onclick: () => this.close(),
@@ -923,6 +918,11 @@ class LinkerManagerDialog extends ComfyDialog {
         this.missingTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'missing' || !this.activeTab);
         this.allTabBtn.classList.toggle('ml-tab-active', this.activeTab === 'all');
         this.exportTabBtn?.classList.toggle('ml-tab-active', this.activeTab === 'export');
+        if (this.settingsButton) {
+            const onSettings = this.activeTab === 'settings';
+            this.settingsButton.style.background = onSettings ? 'rgba(255,255,255,0.1)' : '';
+            this.settingsButton.style.borderColor = onSettings ? 'var(--ml-text, #ddd)' : '';
+        }
     }
 
     renderActiveTab() {
