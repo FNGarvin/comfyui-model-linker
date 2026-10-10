@@ -1282,10 +1282,10 @@ class LinkerManagerDialog extends ComfyDialog {
         const minY = nodes.length ? Math.min(...nodes.map(n => n.pos[1])) : 0;
         const done = [];
 
+        let note = nodes.find(n => n.properties?.model_linker_note);
         graph.beforeChange?.();
         try {
             if (options.note && markdown) {
-                let note = nodes.find(n => n.properties?.model_linker_note);
                 if (!note) {
                     note = LG?.createNode('MarkdownNote') || LG?.createNode('Note');
                     if (note) {
@@ -1338,7 +1338,14 @@ class LinkerManagerDialog extends ComfyDialog {
                         aux_id: 'kianxyzw/comfyui-model-linker',
                         'Node name for S&R': 'ModelLinker'
                     };
-                    linkerNode.pos = [minX, minY - 140];
+                    // Sits right above the Model links note (left-aligned,
+                    // clear of the note's title bar); without a note, above
+                    // the top-left of the workflow
+                    const titleHeight = LG?.NODE_TITLE_HEIGHT || 30;
+                    const height = linkerNode.size?.[1] || 80;
+                    linkerNode.pos = note
+                        ? [note.pos[0], note.pos[1] - titleHeight - height - titleHeight - 20]
+                        : [minX, minY - 140];
                     graph.add(linkerNode);
                     done.push('node');
                 } else {
