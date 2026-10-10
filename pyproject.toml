@@ -16,5 +16,5 @@ Repository = "https://github.com/kianxyzw/comfyui-model-linker"
 Documentation = "https://github.com/kianxyzw/comfyui-model-linker#readme"
 
 [tool.comfy]
-PublisherId = "model-linker"
+PublisherId = "kianxyzw"
 DisplayName = "Model Linker"

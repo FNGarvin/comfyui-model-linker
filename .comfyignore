@@ -1,0 +1,5 @@
+# Development-only files - not needed in the installed extension
+.github/
+tests/
+tools/
+demo.mp4

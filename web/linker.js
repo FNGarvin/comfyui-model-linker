@@ -1335,6 +1335,7 @@ class LinkerManagerDialog extends ComfyDialog {
                 if (linkerNode) {
                     linkerNode.properties = {
                         ...(linkerNode.properties || {}),
+                        cnr_id: 'comfyui-model-linker',
                         aux_id: 'kianxyzw/comfyui-model-linker',
                         'Node name for S&R': 'ModelLinker'
                     };
