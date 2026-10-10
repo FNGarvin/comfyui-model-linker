@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-model-linker"
-version = "1.2.0"
+version = "1.2.1"
 description = "A ComfyUI extension that helps users relink missing models in workflows and download from HuggingFace/CivitAI"
 readme = "README.md"
 license = { file = "LICENSE" }

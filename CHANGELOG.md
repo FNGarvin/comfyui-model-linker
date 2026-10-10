@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1
+
+### Security
+- Text from workflows (model filenames, node and subgraph names) and from online search results is now escaped before it is shown in the Model Linker dialog. Previously a shared workflow with a crafted filename could run script in ComfyUI's page as soon as the dialog opened, which happens automatically when a workflow has missing models. Thanks @FNGarvin for reporting this (#16). Updating is recommended.
+
 ## 1.2.0
 
 ### New

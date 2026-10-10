@@ -2,7 +2,7 @@
 @author: Model Linker Team
 @title: ComfyUI Model Linker
 @nickname: Model Linker
-@version: 1.2.0
+@version: 1.2.1
 @description: Extension for relinking missing models and downloading from HuggingFace/CivitAI
 """
 
