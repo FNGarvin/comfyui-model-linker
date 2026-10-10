@@ -1506,11 +1506,20 @@ class LinkerManagerDialog extends ComfyDialog {
 
         // Flatten to actual canvas nodes. A node inside a subgraph definition
         // exists once per live instance, so each instance is its own target.
-        const targets = [];
+        let targets = [];
         for (const ref of refs) {
             for (const node of this.findLiveNodes(ref)) {
                 targets.push({ ref, node });
             }
+        }
+
+        // A model widget promoted onto a subgraph's outer node is reported
+        // for that outer node too. Locating should go inside to the loader
+        // itself, so skip outer subgraph nodes when the inner node is found.
+        const isOuterSubgraphNode = ({ ref, node }) =>
+            ref.is_top_level !== false && (ref.subgraph_id || node.subgraph);
+        if (targets.some(t => t.ref.is_top_level === false)) {
+            targets = targets.filter(t => !isOuterSubgraphNode(t));
         }
 
         if (targets.length === 0) {
