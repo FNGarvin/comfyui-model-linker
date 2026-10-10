@@ -10,6 +10,27 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { $el, ComfyDialog } from "../../../scripts/ui.js";
 
+/**
+ * Escape a value for interpolation into innerHTML, as element text or
+ * inside a quoted attribute.
+ *
+ * Anything that doesn't come from this file is untrusted: filenames, node
+ * types and subgraph names come from the workflow (a shared workflow can
+ * carry any string), and search/download results come from HuggingFace,
+ * CivitAI and other open platforms. The dialog can open automatically when
+ * a workflow with missing models loads, so unescaped text there would run
+ * script without any click (reported by @FNGarvin, PR #16).
+ */
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Lucide "locate" crosshair - the same glyph ComfyUI's workflow overview uses
 // on its own locate-node buttons (icon-[lucide--locate]).
 const LOCATE_ICON = `<svg class="ml-locate-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12h3m14 0h3M12 2v3m0 14v3"/><circle cx="12" cy="12" r="7"/></svg>`;
@@ -775,7 +796,7 @@ class LinkerManagerDialog extends ComfyDialog {
         return `
             <div class="ml-status ml-status-${type}">
                 <span class="ml-status-icon">${icon}</span>
-                <span>${message}</span>
+                <span>${escapeHtml(message)}</span>
             </div>
         `;
     }
@@ -794,8 +815,8 @@ class LinkerManagerDialog extends ComfyDialog {
                     <div class="ml-progress-fill" style="width: ${percent}%"></div>
                 </div>
                 <div class="ml-progress-text">
-                    <span>${leftText}</span>
-                    <span>${rightText}</span>
+                    <span>${escapeHtml(leftText)}</span>
+                    <span>${escapeHtml(rightText)}</span>
                 </div>
             </div>
         `;
@@ -1099,10 +1120,10 @@ class LinkerManagerDialog extends ComfyDialog {
             const formatted = this.formatFilename(entry.original_path || '', 60);
             const link = this.exportLinks[keyOf(entry)];
             html += `<div class="ml-export-row">`;
-            html += `<div style="min-width: 0;"><div class="ml-export-name" title="${formatted.full}">${formatted.display}</div>`;
-            html += `<span class="ml-export-source">${entry.category || 'unknown'}</span></div>`;
-            html += `<div style="min-width: 0;"><input class="ml-filter-input" data-export-url="${index}" type="url" placeholder="Looking up..." value="${link?.url ? link.url.replace(/"/g, '&quot;') : ''}">`;
-            html += `<span class="ml-export-source" data-export-source="${index}">${describe(link)}</span></div>`;
+            html += `<div style="min-width: 0;"><div class="ml-export-name" title="${escapeHtml(formatted.full)}">${escapeHtml(formatted.display)}</div>`;
+            html += `<span class="ml-export-source">${escapeHtml(entry.category || 'unknown')}</span></div>`;
+            html += `<div style="min-width: 0;"><input class="ml-filter-input" data-export-url="${index}" type="url" placeholder="Looking up..." value="${escapeHtml(link?.url || '')}">`;
+            html += `<span class="ml-export-source" data-export-source="${index}">${escapeHtml(describe(link))}</span></div>`;
             html += `<div class="ml-export-actions">`;
             if (entry.full_path) {
                 html += `<button class="ml-btn ml-btn-secondary ml-btn-sm" data-export-hash="${index}" title="Hash the local file and look it up on HuggingFace, CivitAI and CivArchive">Find by hash</button>`;
@@ -1658,7 +1679,7 @@ class LinkerManagerDialog extends ComfyDialog {
             const items = groups[cat];
             // Filtering expands everything so results are never hidden
             const collapsed = !filter && this.collapsedGroups[cat] === true;
-            html += `<div class="ml-group-header" data-cat="${cat}">${collapsed ? '▸' : '▾'} ${cat} (${items.length})</div>`;
+            html += `<div class="ml-group-header" data-cat="${escapeHtml(cat)}">${collapsed ? '▸' : '▾'} ${escapeHtml(cat)} (${items.length})</div>`;
             if (collapsed) continue;
             for (const { entry, index } of items) {
                 html += this.renderAllModelRow(entry, index);
@@ -1705,15 +1726,15 @@ class LinkerManagerDialog extends ComfyDialog {
         const formatted = this.formatFilename(entry.original_path || '', 50);
         const refs = entry.all_node_refs || [entry];
         const jumpLabel = refs.length > 1 ? `Locate node (${refs.length})` : 'Locate node';
-        const nodeLabel = this.getNodeLabel(entry);
+        const nodeLabel = escapeHtml(this.getNodeLabel(entry));
 
         let html = `<div class="ml-all-row">`;
-        html += `<span class="ml-match-filename" title="${formatted.full}">${formatted.display}</span>`;
+        html += `<span class="ml-match-filename" title="${escapeHtml(formatted.full)}">${escapeHtml(formatted.display)}</span>`;
         if (entry.__missing) {
             html += `<span class="ml-missing-badge">missing</span>`;
         }
         html += this.renderSlotChips(entry);
-        html += `<span class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" data-jump-index="${index}" title="${nodeLabel} #${entry.node_id}${refs.length > 1 ? ` - ${refs.length} nodes use this model, click again for the next one` : ''}">${LOCATE_ICON}${jumpLabel}</span>`;
+        html += `<span class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" data-jump-index="${index}" title="${nodeLabel} #${escapeHtml(entry.node_id)}${refs.length > 1 ? ` - ${refs.length} nodes use this model, click again for the next one` : ''}">${LOCATE_ICON}${jumpLabel}</span>`;
         if (entry.__missing) {
             html += `<button class="ml-btn ml-btn-secondary ml-btn-sm" data-fix-missing="1" title="Resolve it in the Missing tab">Fix</button>`;
         } else {
@@ -1757,7 +1778,7 @@ class LinkerManagerDialog extends ComfyDialog {
             this.renderSwapPanel(panel, entry, files, cats.length > 0);
         } catch (error) {
             console.error('Model Linker: Error loading swap candidates:', error);
-            panel.innerHTML = `<div class="ml-no-matches">Error loading files: ${error.message}</div>`;
+            panel.innerHTML = `<div class="ml-no-matches">Error loading files: ${escapeHtml(error.message)}</div>`;
         }
     }
 
@@ -1784,9 +1805,9 @@ class LinkerManagerDialog extends ComfyDialog {
             shown.slice(0, MAX_SHOWN).forEach(f => {
                 const isCurrent = entry.full_path && f.path === entry.full_path;
                 const label = f.relative_path || f.filename || '';
-                const catChip = categoryFiltered ? '' : `<span class="ml-category-chip">${f.category || ''}</span>`;
+                const catChip = categoryFiltered ? '' : `<span class="ml-category-chip">${escapeHtml(f.category || '')}</span>`;
                 html += `<div class="ml-swap-row">`;
-                html += `<span class="ml-match-filename" title="${f.path || ''}">${label}</span>${catChip}`;
+                html += `<span class="ml-match-filename" title="${escapeHtml(f.path || '')}">${escapeHtml(label)}</span>${catChip}`;
                 html += isCurrent
                     ? `<span class="ml-current-badge">current</span>`
                     : `<button class="ml-btn ml-btn-primary ml-btn-sm" data-swap-path="${encodeURIComponent(f.path || '')}">Select</button>`;
@@ -1894,7 +1915,7 @@ class LinkerManagerDialog extends ComfyDialog {
         } catch (error) {
             console.error('Model Linker: Error loading workflow data:', error);
             if (this.contentElement) {
-                this.contentElement.innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+                this.contentElement.innerHTML = `<p style="color: red;">Error: ${escapeHtml(error.message)}</p>`;
             }
         }
     }
@@ -2140,7 +2161,7 @@ class LinkerManagerDialog extends ComfyDialog {
         const otherMatches = filteredMatches.filter(m => !(m.confidence === 100 && !m.category_mismatch));
         
         // Show the missing filename in full (word-break handles long paths)
-        const missingFilename = missing.original_path || 'Unknown';
+        const missingFilename = escapeHtml(missing.original_path || 'Unknown');
         
         // Determine node info for the chip
         const isSubgraphNode = missing.node_type && missing.node_type.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
@@ -2162,14 +2183,14 @@ class LinkerManagerDialog extends ComfyDialog {
         html += `<h3 class="ml-card-title">${missingFilename}</h3>`;
         html += `<div style="display: flex; align-items: center; gap: 6px;">`;
         if (missing.category) {
-            html += `<span class="ml-category-chip">${missing.category}</span>`;
+            html += `<span class="ml-category-chip">${escapeHtml(missing.category)}</span>`;
         }
         html += this.renderSlotChips(missing);
         const refCount = (missing.all_node_refs || [missing]).length;
         const jumpLabel = refCount > 1 ? `Locate node (${refCount})` : 'Locate node';
         const jumpTitle = refCount > 1
-            ? `${nodeLabel} #${missing.node_id} - ${refCount} nodes use this model, click again for the next one`
-            : `${nodeLabel} #${missing.node_id}`;
+            ? `${escapeHtml(nodeLabel)} #${escapeHtml(missing.node_id)} - ${refCount} nodes use this model, click again for the next one`
+            : `${escapeHtml(nodeLabel)} #${escapeHtml(missing.node_id)}`;
         html += `<span id="jump-${this.slotKey(missing)}" class="ml-node-chip ml-node-chip-clickable ml-node-chip-locate" title="${jumpTitle}">${LOCATE_ICON}${jumpLabel}</span>`;
         html += `</div>`;
         html += `</div>`;
@@ -2197,14 +2218,14 @@ class LinkerManagerDialog extends ComfyDialog {
             for (let matchIndex = 0; matchIndex < sortedMatches.length; matchIndex++) {
                 const match = sortedMatches[matchIndex];
                 const buttonId = `resolve-${this.slotKey(missing)}-${matchIndex}`;
-                const matchPath = match.model?.relative_path || match.filename || '';
+                const matchPath = escapeHtml(match.model?.relative_path || match.filename || '');
                 const isBestMatch = matchIndex === 0 && match.confidence >= 95;
                 
                 html += `<div class="ml-match-row ${isBestMatch ? 'ml-best-match' : ''}">`;
                 html += this.getConfidenceBadge(match.confidence);
                 if (match.category_mismatch) {
-                    const expected = (match.expected_categories || []).filter(Boolean).join(', ') || 'another folder';
-                    const foundIn = match.model?.category || 'unknown';
+                    const expected = escapeHtml((match.expected_categories || []).filter(Boolean).join(', ') || 'another folder');
+                    const foundIn = escapeHtml(match.model?.category || 'unknown');
                     html += `<span class="ml-wrong-folder" title="Found in '${foundIn}' but this node loads from '${expected}'. Move the file there, or link it knowing the node may fail to load it.">⚠ wrong folder</span>`;
                 }
                 html += `<span class="ml-match-filename">${matchPath}</span>`;
@@ -2251,7 +2272,7 @@ class LinkerManagerDialog extends ComfyDialog {
             if (downloadSource.url_source === 'hf_index') sourceLabel = 'HuggingFace (Comfy-Org/Kijai index)';
             if (downloadSource.url_source === 'civarchive') sourceLabel = `CivArchive (${sourceLabels[downloadSource.source] || 'mirror'})`;
             if (downloadSource.match_type === 'hash') sourceLabel += ' · hash match';
-            const downloadFilename = downloadSource.filename || filename;
+            const downloadFilename = escapeHtml(downloadSource.filename || filename);
             
             // Format file size
             let sizeDisplay = '';
@@ -2259,7 +2280,7 @@ class LinkerManagerDialog extends ComfyDialog {
                 if (typeof downloadSource.size === 'number') {
                     sizeDisplay = this.formatBytes(downloadSource.size);
                 } else {
-                    sizeDisplay = downloadSource.size;
+                    sizeDisplay = escapeHtml(downloadSource.size);
                 }
             }
             
@@ -2268,10 +2289,10 @@ class LinkerManagerDialog extends ComfyDialog {
             html += `<span class="ml-btn-icon">☁</span> Download${sizeDisplay ? ` (${sizeDisplay})` : ''}`;
             html += `</button>`;
             html += `<div class="ml-download-info">`;
-            html += `<span class="ml-download-source">${isFromWorkflow ? 'URL from workflow' : sourceLabel}</span>`;
+            html += `<span class="ml-download-source">${isFromWorkflow ? 'URL from workflow' : escapeHtml(sourceLabel)}</span>`;
             const modelCardUrl = this.getModelCardUrl(downloadSource.url);
             if (modelCardUrl) {
-                html += `<br><a href="${modelCardUrl}" target="_blank" rel="noopener noreferrer" class="ml-link" style="word-break: break-all;" title="Open model card">${downloadFilename}</a>`;
+                html += `<br><a href="${escapeHtml(modelCardUrl)}" target="_blank" rel="noopener noreferrer" class="ml-link" style="word-break: break-all;" title="Open model card">${downloadFilename}</a>`;
             } else {
                 html += `<br><span style="word-break: break-all;">${downloadFilename}</span>`;
             }
@@ -3047,7 +3068,7 @@ class LinkerManagerDialog extends ComfyDialog {
             html += `<div class="ml-status ml-status-success" style="flex-direction: column; align-items: flex-start;">`;
             html += `<strong>Found in Popular Models</strong>`;
             html += `<div style="margin-top: 8px;">`;
-            html += `<button class="search-download-btn ml-btn ml-btn-primary ml-btn-sm" data-url="${popular.url}" data-filename="${popular.filename || missing.original_path?.split('/').pop()?.split('\\').pop()}" data-category="${popular.directory || missing.category}">`;
+            html += `<button class="search-download-btn ml-btn ml-btn-primary ml-btn-sm" data-url="${escapeHtml(popular.url)}" data-filename="${escapeHtml(popular.filename || missing.original_path?.split('/').pop()?.split('\\').pop())}" data-category="${escapeHtml(popular.directory || missing.category)}">`;
             html += `<span class="ml-btn-icon">☁</span> Download`;
             html += `</button>`;
             html += `</div></div>`;
@@ -3055,23 +3076,23 @@ class LinkerManagerDialog extends ComfyDialog {
 
         // Model list result (ComfyUI Manager database with fuzzy matching)
         if (modelListResult && modelListResult.url) {
-            const confidence = modelListResult.confidence ? ` (${modelListResult.confidence}%)` : '';
+            const confidence = modelListResult.confidence ? ` (${escapeHtml(modelListResult.confidence)}%)` : '';
             const matchType = modelListResult.match_type === 'exact' ? 'Exact match' : 'Similar model';
             const statusClass = modelListResult.match_type === 'exact' ? 'ml-status-success' : 'ml-status-info';
             
             html += `<div class="ml-status ${statusClass}" style="flex-direction: column; align-items: flex-start;">`;
             html += `<strong>${matchType} in Model Database${confidence}</strong>`;
             html += `<div style="margin-top: 4px; font-size: 12px;">`;
-            html += `<span class="ml-chip">${modelListResult.filename}</span>`;
+            html += `<span class="ml-chip">${escapeHtml(modelListResult.filename)}</span>`;
             if (modelListResult.name) {
-                html += ` <span style="color: var(--ml-text-muted);">${modelListResult.name}</span>`;
+                html += ` <span style="color: var(--ml-text-muted);">${escapeHtml(modelListResult.name)}</span>`;
             }
             if (modelListResult.size) {
-                html += ` <span class="ml-download-size">[${modelListResult.size}]</span>`;
+                html += ` <span class="ml-download-size">[${escapeHtml(modelListResult.size)}]</span>`;
             }
             html += `</div>`;
             html += `<div style="margin-top: 8px;">`;
-            html += `<button class="search-download-btn ml-btn ml-btn-primary ml-btn-sm" data-url="${modelListResult.url}" data-filename="${modelListResult.filename}" data-category="${modelListResult.directory || missing.category}">`;
+            html += `<button class="search-download-btn ml-btn ml-btn-primary ml-btn-sm" data-url="${escapeHtml(modelListResult.url)}" data-filename="${escapeHtml(modelListResult.filename)}" data-category="${escapeHtml(modelListResult.directory || missing.category)}">`;
             html += `<span class="ml-btn-icon">☁</span> Download`;
             html += `</button>`;
             html += `</div></div>`;
@@ -3083,11 +3104,11 @@ class LinkerManagerDialog extends ComfyDialog {
             html += `<div class="ml-status ml-status-info" style="flex-direction: column; align-items: flex-start;">`;
             html += `<strong>Found on HuggingFace</strong>`;
             html += `<div style="margin-top: 4px; font-size: 12px;">`;
-            html += `<span class="ml-chip">${hfResult.filename}</span> `;
-            html += `<span style="color: var(--ml-text-muted);">${hfRepo}</span>`;
+            html += `<span class="ml-chip">${escapeHtml(hfResult.filename)}</span> `;
+            html += `<span style="color: var(--ml-text-muted);">${escapeHtml(hfRepo)}</span>`;
             html += `</div>`;
             html += `<div style="margin-top: 8px;">`;
-            html += `<button class="search-download-btn ml-btn ml-btn-link ml-btn-sm" data-url="${hfResult.url}" data-filename="${hfResult.filename}" data-category="${missing.category}">`;
+            html += `<button class="search-download-btn ml-btn ml-btn-link ml-btn-sm" data-url="${escapeHtml(hfResult.url)}" data-filename="${escapeHtml(hfResult.filename)}" data-category="${escapeHtml(missing.category)}">`;
             html += `<span class="ml-btn-icon">☁</span> Download`;
             html += `</button>`;
             html += `</div></div>`;
@@ -3098,11 +3119,11 @@ class LinkerManagerDialog extends ComfyDialog {
             html += `<div class="ml-status ml-status-warning" style="flex-direction: column; align-items: flex-start;">`;
             html += `<strong>Found on CivitAI</strong>`;
             html += `<div style="margin-top: 4px; font-size: 12px;">`;
-            html += `<span class="ml-chip">${civitaiResult.filename || civitaiResult.name}</span> `;
-            html += `<span style="color: var(--ml-text-muted);">${civitaiResult.type || civitaiResult.name}</span>`;
+            html += `<span class="ml-chip">${escapeHtml(civitaiResult.filename || civitaiResult.name)}</span> `;
+            html += `<span style="color: var(--ml-text-muted);">${escapeHtml(civitaiResult.type || civitaiResult.name)}</span>`;
             html += `</div>`;
             html += `<div style="margin-top: 8px;">`;
-            html += `<button class="search-download-btn ml-btn ml-btn-sm" style="background: #FF9800;" data-url="${civitaiResult.download_url}" data-filename="${civitaiResult.filename || civitaiResult.name + '.safetensors'}" data-category="${missing.category}">`;
+            html += `<button class="search-download-btn ml-btn ml-btn-sm" style="background: #FF9800;" data-url="${escapeHtml(civitaiResult.download_url)}" data-filename="${escapeHtml(civitaiResult.filename || civitaiResult.name + '.safetensors')}" data-category="${escapeHtml(missing.category)}">`;
             html += `<span class="ml-btn-icon">☁</span> Download`;
             html += `</button>`;
             html += `</div></div>`;
