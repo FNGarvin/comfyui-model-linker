@@ -1297,6 +1297,9 @@ class LinkerManagerDialog extends ComfyDialog {
                     }
                 }
                 if (note) {
+                    // Same black note as ComfyUI's official templates
+                    note.color = '#222';
+                    note.bgcolor = '#000';
                     if (note.widgets?.[0]) {
                         note.widgets[0].value = markdown;
                     }
