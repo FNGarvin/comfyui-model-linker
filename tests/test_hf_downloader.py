@@ -410,6 +410,25 @@ def test_url_parsing_decodes_percent_escapes():
     assert parse_huggingface_url('hf://u/r/My%20Model.safetensors')['filename'] == 'My Model.safetensors'
 
 
+def test_remove_staging_retries_until_the_folder_is_gone():
+    tmp = tempfile.mkdtemp(prefix='hfdl_test_')
+    real_rmtree = shutil.rmtree
+    calls = []
+
+    def flaky_rmtree(path, ignore_errors=False):
+        calls.append(path)
+        if len(calls) >= 3:  # first two attempts leave the folder behind, like a held file handle
+            real_rmtree(path, ignore_errors=ignore_errors)
+
+    try:
+        with mock.patch.object(hfd.shutil, 'rmtree', flaky_rmtree), mock.patch.object(hfd.time, 'sleep'):
+            hfd._remove_staging(tmp)
+        assert len(calls) == 3
+        assert not os.path.exists(tmp)
+    finally:
+        real_rmtree(tmp, ignore_errors=True)
+
+
 def test_old_huggingface_hub_without_tqdm_class_raises_import_error():
     import importlib
 

@@ -97,6 +97,16 @@ def _staging_dir(dest_dir: str, download_id: str) -> str:
     return os.path.join(dest_dir, f'.model_linker_tmp_{download_id}')
 
 
+def _remove_staging(path: str) -> None:
+    # On Windows the killed worker can still hold its files for a moment, so a
+    # single rmtree right after the kill can leave the folder behind.
+    for _ in range(10):
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            return
+        time.sleep(0.2)
+
+
 def _pipe_reader(pipe, out_queue):
     """Runs in its own thread; forwards lines from a subprocess pipe into a
     plain thread-safe queue.Queue so the caller can poll with a timeout
@@ -176,7 +186,7 @@ def download_hf_model(
             bufsize=1,
         )
     except Exception as e:
-        shutil.rmtree(staging, ignore_errors=True)
+        _remove_staging(staging)
         with download_lock:
             download_progress[download_id]['status'] = 'error'
             download_progress[download_id]['error'] = f"Could not start download worker: {e}"
@@ -288,7 +298,7 @@ def download_hf_model(
                 proc.wait(timeout=_PROCESS_JOIN_TIMEOUT)
             except subprocess.TimeoutExpired:
                 pass
-        shutil.rmtree(staging, ignore_errors=True)
+        _remove_staging(staging)
         with download_lock:
             download_progress[download_id]['status'] = 'cancelled'
         _safe_print(f"[Model Linker] Cancelled: {filename_display} - incomplete file deleted")
@@ -305,7 +315,7 @@ def download_hf_model(
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             os.replace(result_path, dest_path)
         except Exception as e:
-            shutil.rmtree(staging, ignore_errors=True)
+            _remove_staging(staging)
             with download_lock:
                 download_progress[download_id]['status'] = 'error'
                 download_progress[download_id]['error'] = f"Downloaded but could not move into place: {e}"
@@ -313,7 +323,7 @@ def download_hf_model(
             _safe_print(f"[Model Linker] Error: could not move into place: {e}")
             return
 
-        shutil.rmtree(staging, ignore_errors=True)
+        _remove_staging(staging)
         size = os.path.getsize(dest_path)
         elapsed = time.time() - start_time
         avg_speed = size / elapsed if elapsed > 0 else 0
@@ -326,7 +336,7 @@ def download_hf_model(
         return
 
     # Error path
-    shutil.rmtree(staging, ignore_errors=True)
+    _remove_staging(staging)
     stderr_tail = ''.join(stderr_lines).strip()
     final_error = error_msg or (stderr_tail[-500:] if stderr_tail else None) or "Download failed for an unknown reason"
     with download_lock:
